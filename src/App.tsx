@@ -801,6 +801,7 @@ function UsageTrend({ usage, loading }: { usage: UsageSummary | null; loading: b
 }
 
 function Stat({ label, value }: { label: string; value: number }) {
+
   return (
     <div className="trend-stat">
       <div className="value">{formatCredit(value)}</div>

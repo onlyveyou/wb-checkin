@@ -4,6 +4,24 @@ WorkBuddy / CodeBuddy 多账号每日自动签到 —— macOS 桌面应用（Ta
 
 自己写的版本，只做四件事：**多账号管理 + 每日自动签到 + 积分查询与账号切换 + 本地 AI 监控（可选）**。另有一个可选的**模型摆渡**：把 OpenCode 的免费模型接进 WorkBuddy，见下。不做会话复制、Token 统计。
 
+## 界面
+
+<p align="center"><img src="docs/screenshots/01-accounts.png" width="860" alt="账号签到主界面：概览、账号列表、积分趋势"></p>
+
+菜单栏常驻，两个图标各自独立：主图标带硬盘、CPU、内存，网速单独占一个图标、上下两行显示。点图标弹出面板，右键出菜单。
+
+<p align="center"><img src="docs/screenshots/04-menubar.png" width="720" alt="菜单栏：主图标 + 网速图标"></p>
+
+窗口里可以勾选菜单栏显示哪几项，即时生效，不用重启：
+
+<p align="center"><img src="docs/screenshots/02-system.png" width="860" alt="系统面板与菜单栏显示勾选"></p>
+
+本地 AI 监控是可选功能，没部署本地推理后端时保持关闭即可，关闭状态下不做任何探测：
+
+<p align="center"><img src="docs/screenshots/03-local-ai.png" width="860" alt="本地 AI 监控面板"></p>
+
+完整操作步骤见 [使用说明.md](使用说明.md)。
+
 ## 功能
 
 | 模块 | 说明 |

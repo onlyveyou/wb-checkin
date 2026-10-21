@@ -983,6 +983,7 @@ pub fn run() {
             build_tray(app.handle())?;
             // 菜单栏指标要跟着托盘一起活：窗口收起后仍要每秒刷新。
             sysmon::spawn(app.handle().clone());
+
             // 面板预先建好并隐藏：webview 提前加载完，首次点击才能秒开
             let _ = popover_window(app.handle());
             spawn_scheduler(app.handle().clone());
