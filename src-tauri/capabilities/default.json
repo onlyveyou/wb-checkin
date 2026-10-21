@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "窗口权限：仅允许核心窗口操作，不开放 shell / 文件系统 / http 插件。popover 是菜单栏弹出面板，必须在此登记，否则它的 IPC 调用会被静默拒绝。",
+  "windows": ["main", "popover"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:event:allow-listen"
+  ]
+}

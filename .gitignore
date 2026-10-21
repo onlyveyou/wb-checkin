@@ -1,0 +1,20 @@
+node_modules/
+dist/
+preview-dist/
+src-tauri/target/
+src-tauri/gen/
+.DS_Store
+*.log
+
+# 本地构建产物与安装包，不进仓库
+*.dmg
+*.app
+src-tauri/target/release/bundle/
+
+# 开发过程的内部方案与调研文档，不进公开仓库
+INTEGRATION-TraeWorkAssistant.md
+OC-FERRY-集成方案.md
+
+# 本地配置与快照（正常在 ~/.wb-checkin，这里兜底）
+.wb-checkin/
+profiles/
