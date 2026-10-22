@@ -4,19 +4,45 @@ WorkBuddy / CodeBuddy 多账号每日自动签到 —— macOS 桌面应用（Ta
 
 自己写的版本，只做四件事：**多账号管理 + 每日自动签到 + 积分查询与账号切换 + 本地 AI 监控（可选）**。另有一个可选的**模型摆渡**：把 OpenCode 的免费模型接进 WorkBuddy，见下。不做会话复制、Token 统计。
 
-> ### ⚠️ 免责声明（务必先读）
+<p align="center"><img src="docs/screenshots/01-accounts.png" width="860" alt="账号签到主界面：概览、账号列表、积分趋势"></p>
+
+## 安装
+
+三种方式任选其一。共同前提：macOS 10.15+，当前分发包**仅 arm64（Apple 芯片）**。
+
+**方式一：终端安装（推荐）**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/onlyveyou/wb-checkin/main/install.sh | bash
+```
+
+脚本会从最新 Release 取 dmg、装进 `/Applications`、清掉隔离属性；可重复执行，覆盖旧版前会先退出正在运行的进程。**走终端下载不会被 Gatekeeper 拦住** —— 加隔离属性的是浏览器、AirDrop、微信、邮件，`curl` 不加。
+
+**方式二：手动下载 dmg**
+
+到 [Releases](https://github.com/onlyveyou/wb-checkin/releases/latest) 下载 `WB-Checkin-<版本>-arm64.dmg`。本包**没有 Apple 开发者签名**，经浏览器下载后首次双击会提示「已损坏」，先执行一次再打开：
+
+```bash
+sudo xattr -cr /Applications/WB-Checkin.app
+```
+
+**方式三：自己编译**（产物没有隔离属性，也就用不着签名）
+
+需要 Node 18+ 与 Rust 工具链。Intel 机器走这条：
+
+```bash
+git clone https://github.com/onlyveyou/wb-checkin.git && cd wb-checkin
+npm install && npm run app:build
+# Intel / 通用二进制：npm run app:build -- --target universal-apple-darwin
+```
+
+> **免责声明（下载、安装或使用即视为已阅读并同意全部条款）**
 >
-> 本项目是**个人自用**的第三方工具，与 WorkBuddy / CodeBuddy 官方**没有任何关联**，未获授权或背书，不提供官方支持。
+> 本项目是**个人自用**的第三方工具，与 WorkBuddy / CodeBuddy 官方**没有任何关联**，未获授权或背书，不提供官方支持。仅限管理**你自己名下**的账号，**禁止**用于他人账号，**禁止**用于规避任何第三方服务对账号、额度、计费或风控的管理规定。使用第三方工具存在**账号被限制、额度被调整、数据丢失**等风险，**后果由使用者自行承担**，开发者不承担任何责任，也不作任何担保；本项目按「现状」提供，不承诺功能持续可用。
 >
-> - 仅限管理**你自己名下**的账号。**禁止**用于他人账号，**禁止**用于规避任何第三方服务对账号、额度、计费或风控的管理规定。
-> - 使用第三方工具存在**账号被限制、额度被调整、数据丢失**等风险，**后果由使用者自行承担**，开发者不承担任何责任，也不作任何担保。
-> - 本项目按「现状」提供，不承诺功能持续可用，也不承诺持续维护；第三方服务的使用条款始终适用，遵守义务在使用者。
->
-> **下载、安装或使用即视为已阅读并同意全部条款。完整版见 [DISCLAIMER.md](DISCLAIMER.md)。**
+> 完整条款见 [DISCLAIMER.md](DISCLAIMER.md)，文末[使用范围与免责](#使用范围与免责)是同一份文件的摘要。
 
 ## 界面
-
-<p align="center"><img src="docs/screenshots/01-accounts.png" width="860" alt="账号签到主界面：概览、账号列表、积分趋势"></p>
 
 菜单栏常驻，两个图标各自独立：主图标带硬盘、CPU、内存，网速单独占一个图标、上下两行显示。点图标弹出面板，右键出菜单。
 
@@ -280,7 +306,9 @@ WorkBuddy → 127.0.0.1:41980 → 隔离的 opencode serve → OpenCode Zen 免�
 └── backups/             切换账号前的登录态备份
 ```
 
-## 安装到其他 Mac（务必先读）
+## 没有签名意味着什么（排错）
+
+**正常安装请用上面[「安装」](#安装)里的三种方式之一**，这一节只解释机制，以及出错之后怎么处理。
 
 本工具没有 Apple 开发者签名，属自编译产物。把 DMG 拷到别的电脑后双击，可能遇到**「WB-Checkin」已损坏，无法打开，你应该将它移到废纸篓**。
 
@@ -289,21 +317,20 @@ WorkBuddy → 127.0.0.1:41980 → 隔离的 opencode serve → OpenCode Zen 免�
 1. **Gatekeeper 隔离属性**。文件经 AirDrop / 微信 / 浏览器 / U 盘传输后会被打上 `com.apple.quarantine`。本机直接构建的产物没有这个属性，所以本机双击正常；一旦带上它，系统就会在启动前对 app 做静态校验。
 2. **bundle 签名结构**。仅给可执行文件做链接期签名（`linker-signed`）、而没给整个 `.app` 重新签名的产物，`Info.plist` 与 `Resources/` 不参与封印。校验时判定「签名声称包含资源，但实际没有」→ 直接归为**损坏**，此时「仍要打开」按钮无效。
 
-### 解决（三种任选其一）
+### 隔离属性怎么清
 
 ```bash
-# 方式一：命令行清除隔离属性（最彻底，推荐）
+# 清掉已装好的 app（最彻底，推荐）
 sudo xattr -cr /Applications/WB-Checkin.app
 
-# 方式二：若还挂在 DMG 卷里没拷出来
+# 若还挂在 DMG 卷里没拷出来
 xattr -cr "/Volumes/WB-Checkin/WB-Checkin.app"
 
-# 方式三：图形界面
-# 系统设置 → 隐私与安全性 → 找到「已阻止使用 WB-Checkin」→ 点「仍要打开」
+# 也可以走图形界面：系统设置 → 隐私与安全性
+# → 找到「已阻止使用 WB-Checkin」→ 点「仍要打开」
 ```
 
-> 方式三**只在 0.1.1 及以后的版本上有效**。0.1.0 的产物签名结构损坏，系统不会给出「仍要打开」选项。
-> 方式一在任意版本上都能生效。
+> 图形界面那条**只在 0.1.1 及以后的版本上有效**。0.1.0 的产物签名结构损坏，系统不会给出「仍要打开」选项；`xattr -cr` 在任意版本上都能生效。
 
 ### 版本差异
 
