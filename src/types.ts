@@ -5,6 +5,8 @@ export interface Account {
   email: string | null;
   domain: string;
   hasRefreshToken: boolean;
+  /** token 链的持有方：`checkin` = 签到侧独立授权，写进客户端会消耗掉签到链。 */
+  tokenOwner: "checkin" | "client";
   needsRelogin: boolean;
   needsReloginReason: string | null;
   expiresAt: number | null;
@@ -37,9 +39,13 @@ export interface AppConfig {
   auto_enabled: boolean;
   backup_hour: number;
   backup_minute: number;
+  /** 自动签到之后顺手处理成长中心（旅行 + 任务领奖，不含盲盒）。 */
+  auto_growth: boolean;
   local_ai: LocalAiConfig;
   /** 菜单栏要显示的指标：net / disk / cpu / mem，空数组表示只留图标。 */
   menubar_items: string[];
+  /** 界面自动化新建会话前先切到的模型，空字符串表示不切。 */
+  free_model: string;
 }
 
 /** 系统指标。网速与 CPU 需要两次采样求差，启动后约一秒内为 null。 */
@@ -76,7 +82,8 @@ export interface LogRecord {
   date: string;
   accountId: string;
   account: string;
-  result: "ok" | "already" | "error";
+  /** growth 是自动成长中心（旅行/任务）的独立记录，不参与签到成功数统计。 */
+  result: "ok" | "already" | "error" | "growth";
   message: string;
 }
 
@@ -221,6 +228,25 @@ export interface GrowthSummary {
   failed: number;
   items: GrowthItem[];
   finishedAt: number;
+}
+
+/** 一条待体验任务：进度没达标、也还没领奖。 */
+export interface PendingTask {
+  code: string;
+  title: string;
+  description: string;
+  jumpUrl: string;
+  reward: number;
+  current: number;
+  target: number;
+}
+
+export interface PendingAccount {
+  id: string | null;
+  label: string;
+  ok: boolean;
+  message: string | null;
+  tasks: PendingTask[];
 }
 
 /** 一天的积分消耗。 */

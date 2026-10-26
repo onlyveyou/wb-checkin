@@ -247,10 +247,25 @@ fn default_backup_minute() -> u32 {
     0
 }
 
+/// 自动处理成长中心（旅行领奖/出发 + 任务领奖）默认开启。
+///
+/// 这两件事都是「有就领、没有就跳过」的幂等操作，不影响用户判断，所以跟着自动签到一起跑。
+fn default_auto_growth() -> bool {
+    true
+}
+
 /// 菜单栏默认只显示网速与硬盘 —— 用户最初要的就是这两项，CPU 与内存
 /// 需要自己去设置里勾，免得四个数字默认就把菜单栏撑满。
 fn default_menubar_items() -> Vec<String> {
     vec!["net".to_string(), "disk".to_string()]
+}
+
+/// 新建会话前默认切到的免费模型。
+///
+/// `hy3` 是客户端里标「限时免费」的那档（0.00x）。`hy4` 只在夜间免费，白天照常计费，
+/// 所以不作默认。空字符串表示不切，保持用户当前选择。
+fn default_free_model() -> String {
+    "hy3".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -268,6 +283,11 @@ pub struct AppConfig {
     /// 每日兜底签到的时刻（分）。
     #[serde(default = "default_backup_minute")]
     pub backup_minute: u32,
+    /// 自动签到之后顺手处理成长中心：旅行领奖/再次出发、任务领奖。
+    ///
+    /// 只做这两项，盲盒（抽奖）不在自动范围内 —— 次数有限，由用户自己决定什么时候抽。
+    #[serde(default = "default_auto_growth")]
+    pub auto_growth: bool,
     /// 本地 AI 监控（可选功能，默认关闭）。
     #[serde(default)]
     pub local_ai: LocalAiConfig,
@@ -276,6 +296,11 @@ pub struct AppConfig {
     /// 空数组表示只留图标、不显示文字，与「一个都不勾」等价。
     #[serde(default = "default_menubar_items")]
     pub menubar_items: Vec<String>,
+    /// 界面自动化新建会话前先切到的模型。空字符串表示不切。
+    ///
+    /// 这类体验任务只是走个流程，用付费模型纯属浪费额度。
+    #[serde(default = "default_free_model")]
+    pub free_model: String,
 }
 
 impl AppConfig {
@@ -285,9 +310,11 @@ impl AppConfig {
             auto_enabled: self.auto_enabled,
             backup_hour: self.backup_hour.min(23),
             backup_minute: self.backup_minute.min(59),
+            auto_growth: self.auto_growth,
             local_ai: self.local_ai.normalized(),
             // 走 sysmon 的白名单，顺手剔掉手改配置写进来的乱七八糟标识。
             menubar_items: crate::sysmon::normalize(&self.menubar_items),
+            free_model: self.free_model.trim().to_string(),
         }
     }
 }
@@ -298,8 +325,10 @@ impl Default for AppConfig {
             auto_enabled: default_auto_enabled(),
             backup_hour: default_backup_hour(),
             backup_minute: default_backup_minute(),
+            auto_growth: default_auto_growth(),
             local_ai: LocalAiConfig::default(),
             menubar_items: default_menubar_items(),
+            free_model: default_free_model(),
         }
     }
 }

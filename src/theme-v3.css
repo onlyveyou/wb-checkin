@@ -380,6 +380,14 @@ body {
   font-weight: 600;
 }
 
+/* 独立凭证：签到侧自有登录会话，与客户端登录态互不影响。
+   只在这里定配色与圆角，尺寸在 styles.css 的基础层（与 tag-current 一致）。 */
+.tag-independent {
+  border-radius: 999px;
+  background: #e8eefc;
+  color: #244a8f;
+}
+
 /* ---------- 状态标签：柔色底 + 深色字 ---------- */
 
 .pill {

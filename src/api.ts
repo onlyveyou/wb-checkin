@@ -17,6 +17,7 @@ import type {
   FerryStatus,
   OAuthPoll,
   OAuthStart,
+  PendingAccount,
   ProfileList,
   ProfileSaveResult,
   StorePaths,
@@ -30,11 +31,19 @@ export const listAccounts = () => invoke<Account[]>("list_accounts");
 
 export const getConfig = () => invoke<AppConfig>("get_config");
 
-export const setConfig = (autoEnabled: boolean, backupHour: number, backupMinute: number) =>
+export const setConfig = (
+  autoEnabled: boolean,
+  backupHour: number,
+  backupMinute: number,
+  autoGrowth?: boolean,
+  freeModel?: string,
+) =>
   invoke<AppConfig>("set_config", {
     autoEnabled,
     backupHour,
     backupMinute,
+    autoGrowth,
+    freeModel,
   });
 
 export const getLogs = (limit = 80) => invoke<LogRecord[]>("get_logs", { limit });
@@ -103,13 +112,17 @@ export const switchPreflight = () => invoke<SwitchPreflight>("switch_preflight")
  *
  * `creditsOnly` 为真时只把登录态文件里的凭证换成目标账号的，登录身份与本地现场都不动
  * —— 客户端仍显示原来那个账号，但模型调用按目标账号的额度结算。
+ *
+ * `force` 为真时允许把签到侧独立持有的账号写进客户端。默认拒绝：写进去之后客户端刷新
+ * 一次就会把 refresh token 轮换掉，该账号的自动签到随即失效。
  */
 export const switchToAccount = (
   id: string,
   restart: boolean,
   keepSession: boolean,
   creditsOnly = false,
-) => invoke<SwitchResult>("switch_to_account", { id, restart, keepSession, creditsOnly });
+  force = false,
+) => invoke<SwitchResult>("switch_to_account", { id, restart, keepSession, creditsOnly, force });
 
 // 分层快照：一个账号一套现场，切换时成套换回去，会话才不会断。
 
@@ -129,6 +142,13 @@ export const currentIdentity = () => invoke<CurrentIdentity>("current_identity")
 export const growthRunOne = (id: string) => invoke<GrowthItem>("growth_run_one", { id });
 
 export const growthRunAll = () => invoke<GrowthSummary>("growth_run_all");
+
+/** 待体验任务（进度没达标的）。顺带把没接取的任务接取掉。 */
+export const growthPending = () =>
+  invoke<{ accounts: PendingAccount[] }>("growth_pending");
+
+/** 用系统默认方式打开 deeplink / 站内地址。 */
+export const openLink = (url: string) => invoke<void>("open_link", { url });
 
 // 积分趋势：官方逐请求明细，本地按日汇总。
 
@@ -184,3 +204,18 @@ export const ferrySetProxy = (enabled: boolean) =>
   invoke<{ useSystemProxy: boolean }>("ferry_set_proxy", { enabled });
 
 export const ferryLogs = (lines = 120) => invoke<FerryLogTail>("ferry_logs", { lines });
+
+// 辅助功能驱动：界面自动化只用于「必须发生在客户端里」的动作。
+// 授权归用户在系统设置里给，这里的命令只回报状态、触发一次授权提示、dump 界面树。
+
+/** 辅助功能的状态：`windows > 0` 才是真读得到界面，`trusted` 只表示系统设置里勾没勾。 */
+export type AxStatus = { trusted: boolean; clientPid: number | null; windows: number };
+
+export const axStatus = () =>
+  invoke<{ trusted: boolean; clientPid: number | null; windows: number }>("ax_status");
+
+export const axProbe = () =>
+  invoke<{ path: string; lines: number; windows: number; head: string }>("ax_probe");
+
+export const axRequestTrust = () =>
+  invoke<{ trusted: boolean; clientPid: number | null; windows: number }>("ax_request_trust");

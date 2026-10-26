@@ -451,8 +451,17 @@ pub fn build_account(data: &Value, profile: &Value) -> Value {
         .filter(|candidate| crate::api::is_allowed_domain(candidate))
         .unwrap_or_else(|| "www.codebuddy.cn".to_string());
 
-    let uid = str_of(profile, "uid").or_else(|| str_of(data, "uid"));
-    let nickname = str_of(profile, "nickname").or_else(|| str_of(data, "nickname"));
+    // 账号资料接口可能拿不到（偶发失败/权限差异）。这时退回 token 自身的 sub 认人：
+    // 否则 uid 为空会生成随机 id，同一个账号会被记成两条，独立凭证的迁移就乱了。
+    let (jwt_sub, jwt_name) = match crate::switch::token_owner(&access_token) {
+        Some((sub, name)) => (Some(sub), name),
+        None => (None, None),
+    };
+
+    let uid = str_of(profile, "uid").or_else(|| str_of(data, "uid")).or(jwt_sub);
+    let nickname = str_of(profile, "nickname")
+        .or_else(|| str_of(data, "nickname"))
+        .or(jwt_name);
     let email = str_of(profile, "email").or_else(|| str_of(data, "email"));
     let enterprise_id = str_of(profile, "enterpriseId")
         .or_else(|| str_of(profile, "enterprise_id"))
@@ -493,6 +502,7 @@ pub fn build_account(data: &Value, profile: &Value) -> Value {
         "email": email,
         "enterpriseId": enterprise_id,
         "domain": domain,
+        "token_owner": store::OWNER_CHECKIN,
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": str_of(data, "tokenType")
@@ -500,6 +510,9 @@ pub fn build_account(data: &Value, profile: &Value) -> Value {
             .unwrap_or_else(|| "Bearer".to_string()),
         "expiresAt": expires_at,
         "refreshExpiresAt": refresh_expires_at,
+        // 独立登录刚刚签发了一张新 token，签发时刻就是有效的「刷新时间」。
+        // 不写这个字段会让界面上的刷新时间一直停在旧值（导入路径遗留）。
+        "refreshedAt": now_ms(),
         "profile_raw": profile_raw,
         "source": "oauth",
         "createdAt": now_ms(),

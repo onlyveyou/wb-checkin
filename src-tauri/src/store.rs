@@ -53,6 +53,22 @@ pub fn save_accounts(accounts: &[Value]) -> Result<(), String> {
     write_private(&accounts_file(), &text).map_err(|e| e.to_string())
 }
 
+/// token 链的持有方。
+///
+/// 服务端每刷新一次就换发新的 refresh token（单次可用），所以一个账号同时只能有一条
+/// 活跃的刷新链。`checkin` 表示这条链来自签到侧的独立授权，客户端没有、也不该拿到它；
+/// `client` 表示凭证来自官方客户端登录态，客户端一刷新就会把它轮换掉。
+pub const OWNER_CHECKIN: &str = "checkin";
+pub const OWNER_CLIENT: &str = "client";
+
+/// 读账号的 token 链持有方。字段缺失时按 `client` 处理 —— 历史账号都是客户端导入的。
+pub fn chain_owner(account: &Value) -> String {
+    match get_str(account, "token_owner").as_deref() {
+        Some(OWNER_CHECKIN) => OWNER_CHECKIN.to_string(),
+        _ => OWNER_CLIENT.to_string(),
+    }
+}
+
 /// 前端可见字段。刻意不含任何 token。
 pub fn view(account: &Value) -> Value {
     json!({
@@ -62,6 +78,7 @@ pub fn view(account: &Value) -> Value {
         "email": get_str(account, "email"),
         "domain": get_str(account, "domain").unwrap_or_else(|| "www.codebuddy.cn".to_string()),
         "hasRefreshToken": get_str(account, "refresh_token").is_some(),
+        "tokenOwner": chain_owner(account),
         "needsRelogin": account.get("needs_relogin").and_then(Value::as_bool).unwrap_or(false),
         "needsReloginReason": account.get("needs_relogin_reason").cloned().unwrap_or(Value::Null),
         "expiresAt": account.get("expiresAt").cloned().unwrap_or(Value::Null),
@@ -153,16 +170,10 @@ pub fn record_checkin(id: &str, result: &str, message: &str) {
                 target.insert("last_checkin_date".to_string(), json!(crate::paths::today_local()));
                 target.insert("last_checkin_result".to_string(), json!(result));
                 target.insert("last_checkin_message".to_string(), json!(message));
-                if result == "error" {
-                    let message_lower = message.to_lowercase();
-                    if message.contains("重新登录")
-                        || message.contains("refresh token")
-                        || message_lower.contains("unauthorized")
-                    {
-                        target.insert("needs_relogin".to_string(), json!(true));
-                        target.insert("needs_relogin_reason".to_string(), json!(message));
-                    }
-                } else {
+                if result == "error" && crate::api::chain_dead(message) {
+                    target.insert("needs_relogin".to_string(), json!(true));
+                    target.insert("needs_relogin_reason".to_string(), json!(message));
+                } else if result != "error" {
                     target.remove("needs_relogin");
                     target.remove("needs_relogin_reason");
                 }
@@ -217,11 +228,33 @@ pub fn add_manual(
         .map(|s| format!("uid:{s}"))
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+    // 与「从本机导入」同理：独立授权的账号不接受手动 token 覆盖，否则它那条独立的
+    // 刷新链会被替换掉，签到在客户端下次刷新时失效。
+    let conflict_keys: Vec<String> = [Some(id.clone()), uid.clone()]
+        .into_iter()
+        .flatten()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .collect();
+    if load_accounts().iter().any(|existing| {
+        chain_owner(existing) == OWNER_CHECKIN
+            && [get_str(existing, "id"), get_str(existing, "uid")]
+                .into_iter()
+                .flatten()
+                .any(|key| conflict_keys.iter().any(|candidate| candidate == &key))
+    }) {
+        return Err(
+            "该账号已由签到侧独立持有，写入手动 token 会替换掉它的独立凭证链；如需改回客户端凭证，请先删除该账号再添加"
+                .to_string(),
+        );
+    }
+
     let account = json!({
         "id": id,
         "uid": uid.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         "nickname": nickname.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         "domain": domain,
+        "token_owner": OWNER_CLIENT,
         "access_token": access_token,
         "refresh_token": refresh_token.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         "createdAt": now_ms(),
@@ -288,6 +321,7 @@ fn from_official_record(root: &Value) -> Option<Value> {
             .or_else(|| get_str(root, "enterprise_id"))
             .or_else(|| get_str(&account_object, "enterpriseId"))
             .or_else(|| get_str(&account_object, "enterprise_id")),
+        "token_owner": OWNER_CLIENT,
         "access_token": access_token,
         "refresh_token": refresh_token,
         "expiresAt": parse_ts(root.get("expiresAt").or_else(|| auth_object.get("expiresAt"))),
@@ -339,14 +373,29 @@ pub fn import_local() -> Value {
         .flatten()
         .collect();
 
+    // 签到侧独立授权的账号绝不能被客户端登录态覆盖：那份凭证一写进来，独立的刷新链
+    // 就换成了客户端手里的那条，客户端刷新时它跟着作废。宁可少导入，也不破坏。
+    let protected: std::collections::HashSet<String> = load_accounts()
+        .iter()
+        .filter(|account| chain_owner(account) == OWNER_CHECKIN)
+        .flat_map(|account| [get_str(account, "id"), get_str(account, "uid")])
+        .flatten()
+        .collect();
+
     let mut imported = 0usize;
     let mut merged = 0usize;
+    let mut skipped = 0usize;
 
     for candidate in candidates {
         let keys: Vec<String> = [get_str(&candidate, "id"), get_str(&candidate, "uid")]
             .into_iter()
             .flatten()
             .collect();
+
+        if keys.iter().any(|key| protected.contains(key)) {
+            skipped += 1;
+            continue;
+        }
 
         if keys.iter().any(|key| known.contains(key)) {
             merged += 1;
@@ -364,5 +413,6 @@ pub fn import_local() -> Value {
         "source": path.to_string_lossy(),
         "imported": imported,
         "merged": merged,
+        "skipped": skipped,
     })
 }

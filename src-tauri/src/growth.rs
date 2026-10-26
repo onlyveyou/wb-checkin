@@ -11,7 +11,17 @@
 //! | 盲盒次数 | `/v2/activity/growth/lottery/chances` | GET | — |
 //! | 盲盒抽取 | `/v2/activity/growth/lottery/draw` | POST | `{}` |
 //! | 任务列表 | `/v2/activity/growth/tasks` | GET | — |
-//! | 任务领取 | `/v2/activity/growth/tasks/accept` | POST | `{"task_code": ...}` |
+//! | 任务领奖 | `/v2/activity/growth/tasks/{task_code}/claim` | POST | `{}`（幂等，已领会返回 already_claimed） |
+//!
+//! 任务的**完成度不由我们驱动**：`progress` 只随客户端里的真实行为（创建画布、读文档、
+//! 召唤专家等）增长，服务端没有对外暴露上报进度的入口（`tasks/{code}/complete`、
+//! `/finish`、`/report`、`/progress` 四个形态实测全 404）。所以自动化的边界是三件事：
+//! ① 接取还没报名的任务（`accept` 要 `{"task_codes": [...]}` 数组，接取后服务端才给
+//! 进度槽，`progress` 从 null 变成 0/N）；② 领已完成任务的奖励；③ 把没做完的清单交给
+//! 界面，一键跳到客户端里对应的专家/页面。
+//!
+//! 旧实现调的是 `/tasks/accept` 且传单数 `task_code`，实测该接口要数组，单数体一律
+//! 400，因此既没领到奖、也没接取成功。
 //!
 //! 三个动作各自独立容错：任何一个失败都不影响其余两个。整轮遇凭证失效时刷新一次
 //! 后重跑，与签到模块的策略一致。
@@ -225,7 +235,75 @@ async fn lottery(account: &Value) -> (Value, bool) {
     (json!({ "state": "ok", "message": message }), false)
 }
 
-/// 任务：列表里挑「有奖励且未领取」的逐条 accept。
+/// 任务状态：`not_accepted` / `accepted` / `in_progress` / `completed` / `claimed`。
+fn task_status(item: &Value) -> String {
+    dig(item, &["accept_status", "acceptStatus", "status"])
+        .map(|value| text(Some(value)))
+        .unwrap_or_default()
+}
+
+fn task_code(item: &Value) -> Option<String> {
+    dig(item, &["task_code", "taskCode", "code"])
+        .map(|value| text(Some(value)))
+        .filter(|code| !code.is_empty())
+}
+
+/// 待体验任务的展示形态：界面上「去体验」要用它拼跳转。
+///
+/// 已完成、已领取的不算待体验；未接取的也算（接取后才有进度槽）。
+fn pending_view(item: &Value) -> Option<Value> {
+    let code = task_code(item)?;
+    if task_completed(item) || task_status(item) == "claimed" {
+        return None;
+    }
+    let progress = item.get("progress").filter(|value| !value.is_null());
+    let current = progress.and_then(|p| number(p.get("current"))).unwrap_or(0);
+    let target = progress
+        .and_then(|p| number(p.get("target")))
+        .filter(|target| *target > 0)
+        .unwrap_or(1);
+    Some(json!({
+        "code": code,
+        "title": text(dig(item, &["title", "name"])),
+        "description": text(dig(item, &["task_desc", "description"])),
+        "jumpUrl": text(dig(item, &["jump_url", "jumpUrl"])),
+        "reward": number(item.get("reward_credit")).unwrap_or(0),
+        "current": current,
+        "target": target,
+    }))
+}
+
+/// 任务是否已经「完成」（可以领奖）。
+///
+/// 服务端用 `progress.current >= progress.target` 表示完成，另有 `completed` 状态；
+/// `claimed` 表示奖励已到手，不必再请求。
+fn task_completed(item: &Value) -> bool {
+    let status = task_status(item);
+    if status == "claimed" {
+        return false;
+    }
+    if status == "completed" {
+        return true;
+    }
+
+    let Some(progress) = item.get("progress").filter(|value| !value.is_null()) else {
+        return false;
+    };
+    match (
+        number(progress.get("current")),
+        number(progress.get("target")),
+    ) {
+        (Some(current), Some(target)) => target >= 1 && current >= target,
+        _ => false,
+    }
+}
+
+/// 任务：把「已完成但没领奖」的逐条 claim。
+///
+/// 之前这里调的是 `/tasks/accept`，且传的是单数 `task_code` —— 实测该接口要的是
+/// `{"task_codes": [...]}` 数组，单数体一律 400，所以「任务领奖」从来没生效过。
+/// 更关键的是 accept 只是「报名」，不推进完成度：完成度由用户在客户端里真实操作
+/// 触发（创建画布、读文档、召唤专家…），因此自动化的落点只能是**领已完成任务的奖励**。
 async fn tasks(account: &Value) -> (Value, bool) {
     let extra = headers(account);
     let list = api::get_json(account, &format!("{PREFIX}/tasks"), &extra).await;
@@ -249,32 +327,58 @@ async fn tasks(account: &Value) -> (Value, bool) {
     }
 
     let mut claimed = 0usize;
-    let mut skipped = 0usize;
+    let mut already = 0usize;
+    let mut failed = 0usize;
+    let mut credit = 0i64;
+    let mut titles: Vec<String> = Vec::new();
+
+    // 未接取的任务先批量接取：服务端只有接取之后才给进度槽（`progress` 从 null 变成
+    // 0/N），不再「报名」的话，用户在客户端里真的用了也不会被记进度。
+    let pending_accept: Vec<Value> = items
+        .iter()
+        .filter(|item| task_status(item) == "not_accepted")
+        .filter_map(task_code)
+        .map(Value::String)
+        .collect();
+    let mut accepted = 0usize;
+    if !pending_accept.is_empty() {
+        let response = api::post_json(
+            account,
+            &format!("{PREFIX}/tasks/accept"),
+            json!({ "task_codes": pending_accept }),
+            &extra,
+        )
+        .await;
+        if unauthorized(&response) {
+            return (
+                json!({ "state": "auth", "message": "登录态失效" }),
+                true,
+            );
+        }
+        if api::success(&response) {
+            accepted = pending_accept.len();
+        }
+    }
+
     for item in &items {
-        let has_reward = truthy(item.get("has_reward"))
-            || dig(item, &["hasReward"]).is_some_and(|value| truthy(Some(value)));
-        if !has_reward {
+        if !task_completed(item) {
             continue;
         }
-
-        let status = dig(item, &["accept_status", "acceptStatus", "status"])
+        let Some(code) = dig(item, &["task_code", "taskCode", "code"])
             .map(|value| text(Some(value)))
-            .unwrap_or_default();
-        if matches!(
-            status.as_str(),
-            "1" | "2" | "claimed" | "accepted" | "已领取" | "true" | "True"
-        ) {
-            skipped += 1;
+            .filter(|code| !code.is_empty())
+        else {
             continue;
-        }
-
-        let code = dig(item, &["task_code", "taskCode", "code"]).cloned();
-        let body = match code {
-            Some(value) => json!({ "task_code": value }),
-            None => json!({}),
         };
-        let response =
-            api::post_json(account, &format!("{PREFIX}/tasks/accept"), body, &extra).await;
+
+        // 领奖幂等：已领过的会返回 `{"already_claimed": true, "credit": 0}`，不会重复发奖。
+        let response = api::post_json(
+            account,
+            &format!("{PREFIX}/tasks/{code}/claim"),
+            json!({}),
+            &extra,
+        )
+        .await;
         if unauthorized(&response) {
             return (
                 json!({
@@ -284,28 +388,136 @@ async fn tasks(account: &Value) -> (Value, bool) {
                 true,
             );
         }
-        if api::success(&response) {
-            claimed += 1;
+        if !api::success(&response) {
+            failed += 1;
+            continue;
+        }
+
+        let payload = data_of(&response);
+        if truthy(payload.get("already_claimed")) {
+            already += 1;
+            continue;
+        }
+        claimed += 1;
+        credit += number(payload.get("credit")).unwrap_or(0);
+        let title = text(dig(item, &["title", "name"]));
+        if !title.is_empty() {
+            titles.push(title);
         }
     }
 
-    let message = match (claimed, skipped) {
-        (0, 0) => "没有可领取的任务".to_string(),
-        (0, skipped) => format!("{skipped} 项已领取"),
-        (claimed, 0) => format!("领取了 {claimed} 项"),
-        (claimed, skipped) => format!("领取了 {claimed} 项，{skipped} 项此前已领"),
+    // 还没做完的（含刚接取的）汇总给界面，点一下就能跳到客户端里对应的专家/页面。
+    let pending: Vec<Value> = items.iter().filter_map(pending_view).collect();
+
+    let mut parts: Vec<String> = Vec::new();
+    if accepted > 0 {
+        parts.push(format!("接取 {accepted} 项"));
+    }
+    if claimed > 0 {
+        let detail = if titles.is_empty() {
+            String::new()
+        } else {
+            format!("（{}）", titles.join("、"))
+        };
+        parts.push(format!("领了 {claimed} 项{detail}，共 {credit} 积分"));
+    }
+    if already > 0 {
+        parts.push(format!("{already} 项此前已领"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} 项领取失败"));
+    }
+    if !pending.is_empty() {
+        let names: Vec<String> = pending
+            .iter()
+            .filter_map(|item| item.get("title").and_then(Value::as_str))
+            .filter(|title| !title.is_empty())
+            .map(str::to_string)
+            .take(3)
+            .collect();
+        let suffix = if names.is_empty() {
+            String::new()
+        } else {
+            format!("（{}…）", names.join("、"))
+        };
+        parts.push(format!("{} 项待体验{suffix}", pending.len()));
+    }
+
+    let message = if parts.is_empty() {
+        "没有可领的任务".to_string()
+    } else {
+        parts.join("，")
     };
     (
-        json!({ "state": if claimed > 0 { "ok" } else { "skip" }, "message": message }),
+        json!({
+            "state": if claimed > 0 { "ok" } else { "skip" },
+            "message": message,
+            "claimed": claimed,
+            "accepted": accepted,
+            "credit": credit,
+            "pending": pending,
+        }),
         false,
     )
 }
 
-async fn round(account: &Value) -> (Value, bool) {
+/// 只读地拉一次待体验任务（顺带接取未接取的）。
+///
+/// 供界面的「待体验」清单使用：不刷新凭证、不做旅行与盲盒，失败就把错误交给调用方。
+pub async fn pending_only(account: &Value) -> Value {
+    let extra = headers(account);
+    let list = api::get_json(account, &format!("{PREFIX}/tasks"), &extra).await;
+    if unauthorized(&list) {
+        return json!({ "ok": false, "message": "登录态失效", "pending": [] });
+    }
+    if !api::success(&list) {
+        return json!({ "ok": false, "message": api::describe(&list), "pending": [] });
+    }
+
+    let data = data_of(&list);
+    let items = dig(&data, &["tasks", "list", "records"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let pending_accept: Vec<Value> = items
+        .iter()
+        .filter(|item| task_status(item) == "not_accepted")
+        .filter_map(task_code)
+        .map(Value::String)
+        .collect();
+    if !pending_accept.is_empty() {
+        let _ = api::post_json(
+            account,
+            &format!("{PREFIX}/tasks/accept"),
+            json!({ "task_codes": pending_accept }),
+            &extra,
+        )
+        .await;
+    }
+
+    let pending: Vec<Value> = items.iter().filter_map(pending_view).collect();
+    json!({ "ok": true, "message": Value::Null, "pending": pending })
+}
+
+async fn round(account: &Value, with_lottery: bool) -> (Value, bool) {
     let (travel_result, travel_auth) = travel(account).await;
-    let (lottery_result, lottery_auth) = lottery(account).await;
     let (tasks_result, tasks_auth) = tasks(account).await;
 
+    // 自动处理只跑「旅行 + 任务」，盲盒留给用户手动点：抽奖有次数上限，
+    // 悄悄替用户抽完不合适。
+    if !with_lottery {
+        return (
+            json!({
+                "travel": travel_result,
+                "lottery": Value::Null,
+                "tasks": tasks_result,
+            }),
+            travel_auth || tasks_auth,
+        );
+    }
+
+    let (lottery_result, lottery_auth) = lottery(account).await;
     (
         json!({
             "travel": travel_result,
@@ -320,12 +532,21 @@ async fn round(account: &Value) -> (Value, bool) {
 ///
 /// 返回 `{ "ok": bool, "travel": {...}, "lottery": {...}, "tasks": {...}, "patch": object|null }`
 pub async fn run(account: &Value) -> Value {
-    let (result, needs_auth) = round(account).await;
+    run_with(account, true).await
+}
+
+/// 自动签到之后的顺手处理：只做旅行领奖/出发与任务领奖，不抽盲盒。
+pub async fn run_auto(account: &Value) -> Value {
+    run_with(account, false).await
+}
+
+async fn run_with(account: &Value, with_lottery: bool) -> Value {
+    let (result, needs_auth) = round(account, with_lottery).await;
     if !needs_auth || !api::can_refresh(account) {
         return finish(result, None, account);
     }
 
-    let patch = match api::refresh(account).await {
+    let patch = match api::refresh_guarded(account).await {
         Ok(patch) => patch,
         Err(error) => {
             return json!({ "ok": false, "message": error, "patch": Value::Null });
@@ -337,23 +558,26 @@ pub async fn run(account: &Value) -> Value {
             target.insert(key.clone(), value.clone());
         }
     }
-    let (retried, _) = round(&working).await;
+    let (retried, _) = round(&working, with_lottery).await;
     finish(retried, Some(patch), &working)
 }
 
 fn finish(result: Value, patch: Option<Value>, account: &Value) -> Value {
-    let states = ["travel", "lottery", "tasks"].map(|key| {
-        result
-            .get(key)
-            .and_then(|item| item.get("state"))
-            .and_then(Value::as_str)
-            .unwrap_or("fail")
-            .to_string()
-    });
+    // 自动模式没有盲盒，该项是 null，不能参与整体成败判定。
+    let states: Vec<String> = ["travel", "lottery", "tasks"]
+        .iter()
+        .filter_map(|key| result.get(*key).filter(|item| !item.is_null()))
+        .map(|item| {
+            item.get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("fail")
+                .to_string()
+        })
+        .collect();
 
-    // 三个动作全部是 auth/fail 才算整轮失败；只要有一个 ok 就算跑通。
-    let ok = states.iter().any(|state| state.as_str() == "ok")
-        || states.iter().all(|state| state.as_str() == "skip");
+    // 参与的动作里只要有一个 ok 就算跑通；全部 skip（在途/无可领）也算跑通。
+    let ok = states.iter().any(|state| state == "ok")
+        || (!states.is_empty() && states.iter().all(|state| state == "skip"));
 
     let mut payload = json!({
         "ok": ok,
@@ -397,16 +621,102 @@ mod tests {
     }
 
     #[test]
-    fn claimed_status_values_are_recognised() {
-        for status in ["1", "2", "claimed", "accepted", "已领取", "true"] {
-            assert!(
-                matches!(
-                    status,
-                    "1" | "2" | "claimed" | "accepted" | "已领取" | "true" | "True"
-                ),
-                "{status} 应识别为已领取"
-            );
-        }
-        assert!(!matches!("0", "1" | "2" | "claimed"));
+    fn task_completed_reads_progress_and_status() {
+        // 进度达标 → 可领
+        assert!(task_completed(&json!({
+            "accept_status": "in_progress",
+            "progress": { "current": 3, "target": 3 }
+        })));
+        // 进度不足 → 不可领
+        assert!(!task_completed(&json!({
+            "accept_status": "in_progress",
+            "progress": { "current": 2, "target": 3 }
+        })));
+        // 已完成但还没领 → 可领
+        assert!(task_completed(&json!({ "accept_status": "completed" })));
+        // 已领过 → 不再请求
+        assert!(!task_completed(&json!({
+            "accept_status": "claimed",
+            "progress": { "current": 1, "target": 1 }
+        })));
+        // 未接取、没有进度 → 不可领
+        assert!(!task_completed(&json!({ "accept_status": "not_accepted", "progress": null })));
+        // 进度字段缺失或 target 为 0 时不能误判成完成
+        assert!(!task_completed(&json!({ "accept_status": "accepted" })));
+        assert!(!task_completed(&json!({
+            "accept_status": "accepted",
+            "progress": { "current": 0, "target": 0 }
+        })));
+    }
+
+    #[test]
+    fn pending_view_keeps_unfinished_and_drops_settled() {
+        let done = json!({
+            "task_code": "a", "accept_status": "in_progress",
+            "progress": { "current": 1, "target": 1 }
+        });
+        assert!(pending_view(&done).is_none(), "已达标的不该出现在待体验里");
+
+        let claimed = json!({ "task_code": "b", "accept_status": "claimed" });
+        assert!(pending_view(&claimed).is_none());
+
+        let todo = json!({
+            "task_code": "c", "title": "体验「抖音策略师」", "accept_status": "accepted",
+            "progress": { "current": 0, "target": 1 }, "reward_credit": 50,
+            "jump_url": "workbuddy://experts?expertId=ex_1"
+        });
+        let view = pending_view(&todo).expect("未完成的任务要留下");
+        assert_eq!(view["code"], json!("c"));
+        assert_eq!(view["reward"], json!(50));
+        assert_eq!(view["target"], json!(1));
+        assert_eq!(view["jumpUrl"], json!("workbuddy://experts?expertId=ex_1"));
+
+        // 还没接取、没有进度槽：同样是待体验，target 兜底 1 防止除零式误判
+        let fresh = json!({ "task_code": "d", "accept_status": "not_accepted", "progress": null });
+        let view = pending_view(&fresh).expect("未接取的任务也要列出来");
+        assert_eq!(view["target"], json!(1));
+        assert_eq!(view["current"], json!(0));
+    }
+
+    #[test]
+    fn auto_scope_ignores_absent_lottery_for_overall_verdict() {
+        // 自动模式不跑盲盒，该项是 null：不能因为「null 没有 state」判整轮失败
+        let outcome = finish(
+            json!({
+                "travel": { "state": "skip", "message": "旅行在途" },
+                "lottery": Value::Null,
+                "tasks": { "state": "ok", "message": "领取了 2 项" },
+            }),
+            None,
+            &json!({ "uid": "u-1" }),
+        );
+        assert_eq!(outcome["ok"], json!(true));
+        assert_eq!(outcome["lottery"], Value::Null);
+        assert_eq!(outcome["tasks"]["state"], json!("ok"));
+    }
+
+    #[test]
+    fn all_skipped_counts_as_success_but_all_failed_does_not() {
+        let skipped = finish(
+            json!({
+                "travel": { "state": "skip" },
+                "lottery": Value::Null,
+                "tasks": { "state": "skip" },
+            }),
+            None,
+            &json!({}),
+        );
+        assert_eq!(skipped["ok"], json!(true));
+
+        let failed = finish(
+            json!({
+                "travel": { "state": "fail" },
+                "lottery": Value::Null,
+                "tasks": { "state": "auth" },
+            }),
+            None,
+            &json!({}),
+        );
+        assert_eq!(failed["ok"], json!(false));
     }
 }

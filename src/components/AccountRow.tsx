@@ -102,6 +102,11 @@ export default function AccountRow({
             <span className="text">{name}</span>
             {active && <span className="tag-current">当前登录</span>}
             {billing && <span className="tag-billing">当前额度</span>}
+            {account.tokenOwner === "checkin" && (
+              <span className="tag-independent" title="凭证来自本应用内的独立登录，不随客户端刷新而失效">
+                独立凭证
+              </span>
+            )}
           </div>
           <div className="meta" style={failedToday ? { color: "var(--danger)" } : undefined}>
             {meta || "—"}

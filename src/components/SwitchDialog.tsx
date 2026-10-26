@@ -42,6 +42,9 @@ export default function SwitchDialog({ account, currentName, onClose, onDone }: 
   const [creditsOnly, setCreditsOnly] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 签到侧独立持有凭证的账号默认不允许切换：写进客户端会把签到链消耗掉。 */
+  const [force, setForce] = useState(false);
+  const checkinOwned = account.tokenOwner === "checkin";
 
   useEffect(() => {
     api
@@ -65,7 +68,7 @@ export default function SwitchDialog({ account, currentName, onClose, onDone }: 
     setBusy(true);
     setError(null);
     try {
-      const result = await api.switchToAccount(account.id, restart, keepSession, creditsOnly);
+      const result = await api.switchToAccount(account.id, restart, keepSession, creditsOnly, force);
       const parts = creditsOnly
         ? [`已把额度换成「${result.account}」，客户端登录身份仍是 ${currentName ?? "原账号"}`]
         : [`已把「${result.account}」写入客户端登录态`];
@@ -168,6 +171,25 @@ export default function SwitchDialog({ account, currentName, onClose, onDone }: 
 
           {preflight === null && !error && <div className="hint">正在检查环境…</div>}
 
+          {checkinOwned && (
+            <>
+              <div className="note danger">
+                该账号的 token 由签到侧独立持有。服务端每刷新一次就换发新的 refresh
+                token，写进客户端后客户端刷新一次就会把它轮换掉，<strong>这个账号的自动签到会立即失效</strong>。
+                要正常切它，请先在官方客户端登录该账号（登录后的链归客户端持有），或直接确认下面的强制切换。
+              </div>
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={force}
+                  disabled={busy}
+                  onChange={(event) => setForce(event.target.checked)}
+                />
+                <span>强制切换（接受该账号自动签到失效，需要重新授权才能恢复）</span>
+              </label>
+            </>
+          )}
+
           {preflight && (
             <div className="checklist">
               <CheckLine
@@ -241,7 +263,7 @@ export default function SwitchDialog({ account, currentName, onClose, onDone }: 
           <button
             className="btn danger"
             onClick={submit}
-            disabled={busy || blocked || preflight === null}
+            disabled={busy || blocked || preflight === null || (checkinOwned && !force)}
           >
             {busy && <span className="spin" />}
             {busy ? "切换中，请稍候" : "确认切换"}

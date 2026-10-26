@@ -289,6 +289,19 @@ select {
   letter-spacing: 0.2px;
 }
 
+/* 「独立凭证」标记：尺寸与「当前登录」同款，配色在 theme-v3 里给。
+   缺了 flex:none 会被 .name 的 flex 压扁成竖排，缺了 white-space 会逐字换行。 */
+.tag-independent {
+  flex: none;
+  height: 18px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
 /* 当前账号左侧加一道竖线，扫一列时不用逐个读标记 */
 .account.active {
   box-shadow: inset 3px 0 0 var(--accent);
@@ -458,6 +471,14 @@ select {
   font-size: 12px;
   color: var(--faint);
   max-width: 460px;
+}
+
+/* 行右侧的动作组：按钮并排，不参与左侧文字的伸缩 */
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
 }
 
 .switch {
@@ -2484,4 +2505,158 @@ body {
   font-size: 11px;
   color: var(--muted);
   line-height: 1.5;
+}
+
+/* ---------- 待体验任务 ----------
+   这一块只是「把待办摆出来 + 一键跳过去」：任务进度本身由客户端里的真实行为推进，
+   这里不参与任何上报。尺寸都落在基础层，主题层不重复定义。 */
+
+.head-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.head-meta {
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-panel {
+  padding: 10px 0 12px;
+}
+
+/* 账号切换：横向胶囊，账号多了横滑，不把面板撑高 */
+.task-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 0 14px 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.task-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.task-tab {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.task-tab:hover {
+  background: var(--surface-sunken);
+  color: var(--text);
+}
+
+.task-tab.active {
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+
+.task-tab-count {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+
+/* 行：内容一列 + 积分 + 按钮。右侧两列定宽，保证每行右边缘对齐 */
+.task-list {
+  padding: 0 14px;
+}
+
+.task-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  column-gap: 10px;
+  padding: 9px 0;
+}
+
+.task-row + .task-row {
+  border-top: 1px dashed var(--border);
+}
+
+.task-main {
+  min-width: 0;
+}
+
+.task-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.task-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-progress {
+  flex: none;
+  height: 17px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--muted);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.task-reward {
+  min-width: 34px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 描述统一一行、超长省略：两行 clamp 会让行高不齐，一屏看下来很乱 */
+.task-desc {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-row .btn {
+  min-width: 56px;
+}
+
+.task-foot {
+  margin: 8px 14px 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--faint);
 }

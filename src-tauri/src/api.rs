@@ -148,15 +148,59 @@ fn is_success(response: &Value) -> bool {
 }
 
 /// 判断是否属于「凭证失效」，用于触发一次刷新重试。
+///
+/// 只认服务端明确的鉴权语义。旧的实现用 `message.contains("token")` 兜底匹配，
+/// 任何一条带 token 字样的普通业务错误都会触发刷新；刷新一旦失败又整轮中止，
+/// 结果是一次无关报错就把当天签到弄没了。
 pub fn is_unauthorized(response: &Value) -> bool {
     let code = code_of(response);
     if code == 401 || code == 403 {
         return true;
     }
+
     let message = message_of(response).to_lowercase();
-    ["unauthorized", "401", "登录", "失效", "过期", "token"]
-        .iter()
-        .any(|needle| message.contains(needle))
+    let english = [
+        "unauthorized",
+        "invalid_token",
+        "invalid token",
+        "token expired",
+        "token is expired",
+        "token has expired",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle));
+
+    // 中文不靠单个词兜底：「登录」「失效」各自单独出现太常见（如「登录即送额度」），
+    // 必须主体词与状态词同时出现才算鉴权失效。
+    let subject = ["登录", "凭证", "鉴权", "授权"].iter().any(|word| message.contains(word));
+    let state = ["失效", "过期", "无效", "未登录"].iter().any(|word| message.contains(word));
+
+    english || (subject && state)
+}
+
+/// 是否为网络层失败（连不上、超时、连接被重置）。
+///
+/// 与凭证无关：这类失败应当原样重试，绝不能拿去刷新 token。
+pub fn is_transport_failure(response: &Value) -> bool {
+    code_of(response) == -1
+}
+
+/// 判断错误是否属于「refresh token 已被服务端轮换或作废」。
+///
+/// 与 `is_unauthorized` 分工不同：那个决定「要不要刷一次」，认得很宽（消息里带 token
+/// 就算），目的是不错过刷新时机；这个决定「要不要从客户端重同步凭证」，所以只认服务端
+/// 明确的凭证失效语义，网络错误不该触发。
+pub fn chain_dead(message: &str) -> bool {
+    let text = message.to_lowercase();
+    [
+        "12153",
+        "invalid_grant",
+        "refresh token is invalid",
+        "doesn't have required client",
+        "重新登录",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 /// 响应是否成功（供积分等模块判断，不必各自重写 0/200 判定）。
@@ -276,7 +320,119 @@ pub async fn refresh(account: &Value) -> Result<Value, String> {
     Ok(Value::Object(patch))
 }
 
-/// 单账号签到：状态 → 提交；遇凭证失效刷新一次后重试。
+/// 刷新串行化的全局闸门。
+///
+/// 服务端刷新即轮换：同一条 refresh token 被并发刷新时，后到者一定拿到 12153。
+/// App 内「签到 / 查积分 / 切换」三条链路都可能刷新同一账号，所以必须串起来。
+static REFRESH_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+/// 把账号记录里已有的凭证字段抽成 patch。
+fn token_patch(account: &Value) -> Value {
+    let mut patch = serde_json::Map::new();
+    for key in ["access_token", "refresh_token", "expiresAt", "refreshExpiresAt"] {
+        if let Some(value) = account.get(key) {
+            if !value.is_null() {
+                patch.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    Value::Object(patch)
+}
+
+/// 串行 + 互认地刷新 token。
+///
+/// 进锁后先回读账号库：如果库里那条 refresh token 已经和手上的不一样，说明别人
+/// （另一条链路、或上一次自己）已经刷过，直接采用库里的凭证，不再二次刷新 ——
+/// 否则这一刷就是把刚发下来的新凭证又作废一次。
+///
+/// 刷成功后立刻写回账号库，让同时排队的其他链路能命中上面的短路分支。
+pub async fn refresh_guarded(account: &Value) -> Result<Value, String> {
+    let lock = REFRESH_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _guard = lock.lock().await;
+
+    let id = str_field(account, "id").unwrap_or_default();
+    let mine = str_field(account, "refresh_token").unwrap_or_default();
+
+    if !id.is_empty() {
+        let stored = crate::store::load_accounts()
+            .into_iter()
+            .find(|candidate| str_field(candidate, "id").as_deref() == Some(id.as_str()));
+        if let Some(stored) = stored {
+            let theirs = str_field(&stored, "refresh_token").unwrap_or_default();
+            if !theirs.is_empty() && theirs != mine {
+                let patch = token_patch(&stored);
+                if patch.get("access_token").is_some() {
+                    return Ok(patch);
+                }
+            }
+        }
+    }
+
+    let patch = refresh(account).await?;
+    if !id.is_empty() {
+        let _ = crate::store::apply_patch(&id, &patch);
+    }
+    Ok(patch)
+}
+
+/// 网络层失败的额外重试次数（首次之外）。
+const TRANSPORT_RETRIES: u32 = 2;
+
+fn with_network_prefix(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        if let Some(message) = object.get("error").and_then(Value::as_str) {
+            let prefixed = format!("网络异常：{message}");
+            object.insert("error".to_string(), json!(prefixed));
+        }
+    }
+    value
+}
+
+/// 查状态，网络层失败时原地重试。
+///
+/// 传输错误与凭证无关，重试同一个请求才是正确处置；拿去刷 token 只会白白消耗
+/// 一次轮换，还会在刷新失败时把整轮签到中止掉。
+async fn fetch_status_retrying(account: &Value) -> Value {
+    let mut last = json!({ "ok": false, "error": "请求未发出", "code": -1 });
+    for attempt in 0..=TRANSPORT_RETRIES {
+        last = fetch_status(account).await;
+        if last.get("ok").and_then(Value::as_bool) == Some(true) || !is_transport_failure(&last) {
+            return last;
+        }
+        if attempt < TRANSPORT_RETRIES {
+            tokio::time::sleep(Duration::from_millis(600 * u64::from(attempt + 1))).await;
+        }
+    }
+    with_network_prefix(last)
+}
+
+async fn submit_retrying(account: &Value) -> Value {
+    let mut last = json!({ "ok": false, "error": "请求未发出", "code": -1 });
+    for attempt in 0..=TRANSPORT_RETRIES {
+        last = submit(account).await;
+        if last.get("ok").and_then(Value::as_bool) == Some(true) || !is_transport_failure(&last) {
+            return last;
+        }
+        if attempt < TRANSPORT_RETRIES {
+            tokio::time::sleep(Duration::from_millis(600 * u64::from(attempt + 1))).await;
+        }
+    }
+    with_network_prefix(last)
+}
+
+/// 把刷新得到的凭证合并进工作副本。
+fn absorb(working: &mut Value, patch: &Value) {
+    if let (Some(target), Some(source)) = (working.as_object_mut(), patch.as_object()) {
+        for (key, value) in source {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+/// 单账号签到：状态 → 提交。
+///
+/// 两条处置分开：**网络失败只重试同一请求**，**只有明确鉴权失效才刷新 token**，
+/// 且刷新走 `refresh_guarded`（串行 + 互认），避免与查积分、切换等链路并发轮换。
 ///
 /// 返回值：`{ "ok": bool, "result": "ok"|"already"|"error", "message": string, "patch": object|null }`
 /// `patch` 是需要合并回账号记录的字段（新 token 等）。
@@ -284,22 +440,12 @@ pub async fn checkin_account(account: &Value) -> Value {
     let mut working = account.clone();
 
     for attempt in 0..2 {
-        let status = fetch_status(&working).await;
+        let status = fetch_status_retrying(&working).await;
         if status.get("ok").and_then(Value::as_bool) != Some(true) {
-            let code = status.get("code").and_then(Value::as_i64).unwrap_or(-1);
-            let retryable = attempt == 0
-                && str_field(&working, "refresh_token").is_some()
-                && (status.get("error").is_some()
-                    && (is_unauthorized(&status) || code == -1));
-            if retryable {
-                match refresh(&working).await {
+            if attempt == 0 && can_refresh(&working) && is_unauthorized(&status) {
+                match refresh_guarded(&working).await {
                     Ok(patch) => {
-                        if let (Some(target), Some(source)) = (working.as_object_mut(), patch.as_object())
-                        {
-                            for (key, value) in source {
-                                target.insert(key.clone(), value.clone());
-                            }
-                        }
+                        absorb(&mut working, &patch);
                         continue;
                     }
                     Err(error) => {
@@ -319,7 +465,7 @@ pub async fn checkin_account(account: &Value) -> Value {
             return json!({ "ok": true, "result": "already", "message": "今日已签到", "patch": Value::Null });
         }
 
-        let result = submit(&working).await;
+        let result = submit_retrying(&working).await;
         if result.get("ok").and_then(Value::as_bool) == Some(true) {
             let already = result.get("already").and_then(Value::as_bool).unwrap_or(false);
             return json!({
@@ -330,18 +476,10 @@ pub async fn checkin_account(account: &Value) -> Value {
             });
         }
 
-        let code = result.get("code").and_then(Value::as_i64).unwrap_or(-1);
-        if attempt == 0
-            && str_field(&working, "refresh_token").is_some()
-            && (is_unauthorized(&result) || code == -1)
-        {
-            match refresh(&working).await {
+        if attempt == 0 && can_refresh(&working) && is_unauthorized(&result) {
+            match refresh_guarded(&working).await {
                 Ok(patch) => {
-                    if let (Some(target), Some(source)) = (working.as_object_mut(), patch.as_object()) {
-                        for (key, value) in source {
-                            target.insert(key.clone(), value.clone());
-                        }
-                    }
+                    absorb(&mut working, &patch);
                     continue;
                 }
                 Err(error) => {
@@ -400,5 +538,57 @@ mod tests {
         assert!(checked_in_flag(&json!({ "today_checked_in": true })));
         assert!(checked_in_flag(&json!({ "todayCheckedIn": true })));
         assert!(!checked_in_flag(&json!({})));
+    }
+
+    #[test]
+    fn unauthorized_needs_explicit_auth_semantics() {
+        // 明确鉴权语义才算
+        assert!(is_unauthorized(&json!({ "code": 401 })));
+        assert!(is_unauthorized(&json!({ "code": 403 })));
+        assert!(is_unauthorized(&json!({ "code": 10001, "msg": "invalid_token" })));
+        assert!(is_unauthorized(&json!({ "code": 10001, "msg": "登录已失效，请重新登录" })));
+        assert!(is_unauthorized(&json!({ "code": 10001, "msg": "凭证已过期" })));
+
+        // 旧实现里「消息含 token」就会误判，这类业务文案不得触发刷新
+        assert!(!is_unauthorized(&json!({ "code": 10001, "msg": "token 兑换活动已结束" })));
+        assert!(!is_unauthorized(&json!({ "code": 10001, "msg": "登录即送 100 额度" })));
+        assert!(!is_unauthorized(&json!({ "code": 10001, "msg": "请求不合法" })));
+        // 只有「登录」没有状态词，同样不算
+        assert!(!is_unauthorized(&json!({ "code": 10001, "msg": "请登录后查看活动列表" })));
+    }
+
+    #[test]
+    fn transport_failure_is_not_auth_failure() {
+        let network = json!({ "code": -1, "message": "error sending request for url" });
+        assert!(is_transport_failure(&network));
+        assert!(!is_unauthorized(&network));
+        assert!(!is_unauthorized(&json!({ "code": 0, "msg": "OK" })));
+        assert!(!is_transport_failure(&json!({ "code": 401 })));
+    }
+
+    #[test]
+    fn chain_dead_matches_server_revocation_wording() {
+        assert!(chain_dead("刷新失败：12153: refresh token is invalid"));
+        assert!(chain_dead("invalid_grant: Session doesn't have required client"));
+        assert!(chain_dead("请重新登录"));
+        assert!(!chain_dead("网络异常：error sending request"));
+        assert!(!chain_dead("刷新失败：400 Bad Request"));
+    }
+
+    #[test]
+    fn token_patch_only_carries_credential_fields() {
+        let account = json!({
+            "id": "uid:1",
+            "nickname": "n",
+            "access_token": "at",
+            "refresh_token": "rt",
+            "expiresAt": 1,
+            "refreshExpiresAt": 2,
+        });
+        let patch = token_patch(&account);
+        assert_eq!(patch["access_token"], json!("at"));
+        assert_eq!(patch["refresh_token"], json!("rt"));
+        assert!(patch.get("nickname").is_none());
+        assert!(patch.get("id").is_none());
     }
 }

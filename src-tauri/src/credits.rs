@@ -234,7 +234,7 @@ pub async fn fetch(account: &Value) -> Value {
         return first;
     }
 
-    match api::refresh(account).await {
+    match api::refresh_guarded(account).await {
         Ok(patch) => {
             let mut working = account.clone();
             merge_patch(&mut working, &patch);

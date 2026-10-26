@@ -562,8 +562,9 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
 
 /// 从 accessToken（JWT）里取出 `sub` 与 `preferred_username`。
 ///
-/// 不验签：这里只是读「这个 token 是谁的」，用于界面上分辨付费账号。
-fn token_owner(token: &str) -> Option<(String, Option<String>)> {
+/// 不验签：这里只是读「这个 token 是谁的」，用于界面上分辨付费账号，以及独立登录
+/// 拿不到账号资料时兜底认出 uid（避免同一个账号被记成两条）。
+pub(crate) fn token_owner(token: &str) -> Option<(String, Option<String>)> {
     let payload = token.split('.').nth(1)?;
     let raw = base64url_decode(payload)?;
     let value: Value = serde_json::from_slice(&raw).ok()?;
@@ -584,6 +585,79 @@ fn jwt_exp(token: &str) -> Option<i64> {
     let raw = base64url_decode(payload)?;
     let value: Value = serde_json::from_slice(&raw).ok()?;
     value.get("exp").and_then(Value::as_i64)
+}
+
+/// 把官方客户端**当前登录态**里的凭证同步回账号库。
+///
+/// 存在的原因：服务端刷新一次就换发新的 refresh token，客户端刷新过之后账号库里
+/// 那份副本就被轮换掉了，签到再去刷必然 12153。只要客户端此刻登录的正是这个账号，
+/// 就可以把它的最新凭证原样取回来继续用，不必让用户重新登录。
+///
+/// 只读客户端文件，不写、不重启；客户端没登录这个账号时返回错误，由调用方决定是否
+/// 落到「需要重新登录」。
+pub fn sync_from_client(id: &str, uid: &str) -> Result<Value, String> {
+    let session = read_json(&auth_file_path()).ok_or_else(|| "读不到官方登录态文件".to_string())?;
+
+    let login_uid = session
+        .pointer("/account/uid")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let auth = session
+        .get("auth")
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let access_token = auth
+        .get("accessToken")
+        .or_else(|| auth.get("access_token"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "客户端登录态里没有可用的 access token".to_string())?;
+
+    // 归属校验：token 能解析就用它的 `sub`，解析不了（被客户端加密回写）就退回文件里的 uid。
+    let owner_uid = token_owner(&access_token).map(|(sub, _)| sub).or(login_uid);
+    match owner_uid.as_deref() {
+        Some(owner) if owner == uid => {}
+        Some(_) => return Err("客户端当前登录的不是这个账号".to_string()),
+        None => return Err("无法确认客户端登录的是哪个账号".to_string()),
+    }
+
+    let mut patch = serde_json::Map::new();
+    patch.insert("access_token".to_string(), json!(access_token));
+    let refresh_token = auth
+        .get("refreshToken")
+        .or_else(|| auth.get("refresh_token"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if let Some(token) = refresh_token.as_deref() {
+        patch.insert("refresh_token".to_string(), json!(token));
+    }
+
+    // 过期时间一律以 JWT 的 exp 为准：客户端文件里的 expiresAt 可能已被加密或落在
+    // 别的信封里，而 exp 是唯一不会说谎的那个。
+    if let Some(expire) = jwt_exp(patch.get("access_token").and_then(Value::as_str).unwrap_or_default())
+    {
+        patch.insert("expiresAt".to_string(), json!(expire * 1000));
+    }
+    if let Some(expire) = refresh_token.as_deref().and_then(jwt_exp) {
+        patch.insert("refreshExpiresAt".to_string(), json!(expire * 1000));
+    }
+
+    patch.insert("refreshedAt".to_string(), json!(now_ms()));
+    // 凭证回到客户端手里，刷新链的主动权也随之回到客户端。
+    patch.insert("token_owner".to_string(), json!(store::OWNER_CLIENT));
+    patch.insert("needs_relogin".to_string(), json!(false));
+    patch.insert("needs_relogin_reason".to_string(), Value::Null);
+
+    store::apply_patch(id, &Value::Object(patch))?;
+    Ok(json!({ "ok": true, "uid": uid }))
 }
 
 /// 记录「额度切给了谁」——客户端会把明文 token 重新加密回写，那时就无法再从文件里
@@ -692,11 +766,15 @@ pub fn preflight() -> Value {
 /// 登录态，最后恢复目标账号的现场 —— 这样重启后侧边栏与正在进行的会话都还在。
 /// `credits_only` 为真时只替换 `auth` 凭证：登录身份与本地现场一律不动，
 /// 客户端仍显示原账号，结算走凭证所属的那个账号。
+///
+/// `force` 为真时允许把签到侧独立持有的账号写进客户端。默认拒绝：写进去之后客户端
+/// 一刷新就会把 refresh token 轮换掉，签到随之失效。
 pub async fn switch_account(
     id: &str,
     restart: bool,
     keep_session: bool,
     credits_only: bool,
+    force: bool,
 ) -> Result<Value, String> {
     let account = store::load_accounts()
         .into_iter()
@@ -707,6 +785,16 @@ pub async fn switch_account(
         .or_else(|| store::get_str(&account, "uid"))
         .unwrap_or_else(|| "未知账号".to_string());
 
+    // 签到侧的凭证一旦交给客户端，客户端刷新一次就会把它轮换掉，账号库里的副本当场
+    // 作废。这类损耗是静默的（客户端里看着一切正常），必须在写入前拦下来。
+    if !force && store::chain_owner(&account) == store::OWNER_CHECKIN {
+        return Err(format!(
+            "「{label}」的 token 由签到侧独立持有：写进客户端后，客户端刷新一次就会把它轮换掉，自动签到会立即失效。\
+             要切这个账号，请先在官方客户端登录它（登录后的链归客户端持有，可正常切换），\
+             或在界面上勾选「强制切换」并接受该账号自动签到失效。"
+        ));
+    }
+
     if store::get_str(&account, "access_token").is_none() {
         return Err("该账号缺少 access_token，请重新导入或登录".to_string());
     }
@@ -716,7 +804,7 @@ pub async fn switch_account(
 
     // 先把 token 刷新到最新再写入：否则客户端继位后会拿着一个临期（甚至已过期）
     // 的 token 启动。刷新失败不阻断切换，但要在结果里说明。
-    let (account, refreshed, refresh_error) = match api::refresh(&account).await {
+    let (account, refreshed, refresh_error) = match api::refresh_guarded(&account).await {
         Ok(patch) => {
             let mut merged = account.clone();
             if let (Some(target), Some(source)) = (merged.as_object_mut(), patch.as_object()) {
@@ -773,6 +861,10 @@ pub async fn switch_account(
         }
         path
     };
+
+    // 凭证已经落进客户端文件，刷新链的主动权随之转移：此后客户端每刷新一次都会换发
+    // 新的 refresh token，账号库里这份只能被动失效。标记清楚，免得下次又指望它还能刷。
+    let _ = store::apply_patch(id, &json!({ "token_owner": store::OWNER_CLIENT }));
 
     let mut launched = false;
     let mut launch_error: Option<String> = None;

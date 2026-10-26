@@ -4,6 +4,7 @@
 //! 这样就没有「本地端口无鉴权、可被同机进程或网页调用」的攻击面。
 
 mod api;
+mod axdrive;
 mod credits;
 mod ferry;
 mod growth;
@@ -74,18 +75,44 @@ async fn perform(account: Value) -> Value {
     let id = store::get_str(&account, "id").unwrap_or_default();
     let label = display_name(&account);
 
-    let outcome = api::checkin_account(&account).await;
+    let mut outcome = api::checkin_account(&account).await;
+    let mut resynced = false;
+
+    // 刷新链被客户端轮换掉后，账号库里的副本必然失效（12153 / invalid_grant）。
+    // 若官方客户端此刻登录的正是这个账号，把它的最新凭证同步回来再试一次即可，
+    // 不必让用户重新登录。客户端登录的是别的账号时同步会失败，保持原错误。
+    if outcome.get("ok").and_then(Value::as_bool) != Some(true) {
+        let message = outcome.get("message").and_then(Value::as_str).unwrap_or_default();
+        let uid = store::get_str(&account, "uid").unwrap_or_default();
+        if api::chain_dead(message)
+            && !uid.is_empty()
+            && store::chain_owner(&account) == store::OWNER_CLIENT
+            && switch::sync_from_client(&id, &uid).is_ok()
+        {
+            if let Some(fresh) = store::load_accounts()
+                .into_iter()
+                .find(|candidate| store::get_str(candidate, "id").as_deref() == Some(id.as_str()))
+            {
+                outcome = api::checkin_account(&fresh).await;
+                resynced = true;
+            }
+        }
+    }
+
     let ok = outcome.get("ok").and_then(Value::as_bool).unwrap_or(false);
     let result = outcome
         .get("result")
         .and_then(Value::as_str)
         .unwrap_or("error")
         .to_string();
-    let message = outcome
+    let mut message = outcome
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    if resynced && !ok {
+        message = format!("{message}（已从客户端重同步 token 后重试）");
+    }
 
     if let Some(patch) = outcome.get("patch") {
         let _ = store::apply_patch(&id, patch);
@@ -99,11 +126,36 @@ async fn perform(account: Value) -> Value {
         "ok": ok,
         "result": result,
         "message": message,
+        "resynced": resynced,
     })
 }
 
+/// 签到之后顺手处理成长中心，把结果挂到签到条目上并写一条日志。
+///
+/// 只做旅行（领奖/再次出发）与任务领奖，不碰盲盒。任何一项失败都不影响签到结果，
+/// 因此这里不改 `item.ok`，只多挂一个 `growth` 字段。
+async fn attach_growth(account: &Value, mut item: Value) -> Value {
+    let outcome = growth::run_auto(account).await;
+    let growth = growth_item(account, &outcome);
+
+    let message = growth.get("message").and_then(Value::as_str).unwrap_or("");
+    if !message.is_empty() {
+        let id = store::get_str(account, "id").unwrap_or_default();
+        let label = display_name(account);
+        logs::append(&id, &label, "growth", &format!("成长 · {message}"));
+    }
+
+    if let Some(object) = item.as_object_mut() {
+        object.insert("growth".to_string(), growth);
+    }
+    item
+}
+
 /// 跑一轮：所有账号依次签到。`app` 存在时逐条推送进度。
-async fn run_cycle(app: Option<tauri::AppHandle>) -> Value {
+///
+/// `with_growth` 为真时，每个账号签到之后顺手跑成长中心（旅行 + 任务）。只有自动
+/// 调度会传 true：手动「一键签到」保持只签到，不让一次点击被成长中心拖长。
+async fn run_cycle(app: Option<tauri::AppHandle>, with_growth: bool) -> Value {
     let Some(_guard) = CycleGuard::acquire() else {
         return json!({
             "total": 0, "succeeded": 0, "failed": 0, "items": [],
@@ -117,7 +169,10 @@ async fn run_cycle(app: Option<tauri::AppHandle>) -> Value {
     let mut succeeded = 0usize;
 
     for (index, account) in accounts.into_iter().enumerate() {
-        let item = perform(account).await;
+        let mut item = perform(account.clone()).await;
+        if with_growth {
+            item = attach_growth(&account, item).await;
+        }
         if item.get("ok").and_then(Value::as_bool) == Some(true) {
             succeeded += 1;
         }
@@ -148,7 +203,7 @@ async fn run_cycle(app: Option<tauri::AppHandle>) -> Value {
 async fn run_scheduled(app: &tauri::AppHandle) {
     let config = paths::load_config();
     if config.auto_enabled && !store::load_accounts().is_empty() {
-        let _ = run_cycle(Some(app.clone())).await;
+        let _ = run_cycle(Some(app.clone()), config.auto_growth).await;
     }
 }
 
@@ -239,6 +294,8 @@ fn set_config(
     auto_enabled: bool,
     backup_hour: u32,
     backup_minute: u32,
+    auto_growth: Option<bool>,
+    free_model: Option<String>,
 ) -> Result<paths::AppConfig, String> {
     // 先读后改：配置里还有本地 AI 监控等本命令不负责的字段，
     // 直接构造新结构会把它们重置成默认值。
@@ -246,6 +303,12 @@ fn set_config(
     config.auto_enabled = auto_enabled;
     config.backup_hour = backup_hour;
     config.backup_minute = backup_minute;
+    if let Some(auto_growth) = auto_growth {
+        config.auto_growth = auto_growth;
+    }
+    if let Some(free_model) = free_model {
+        config.free_model = free_model;
+    }
     let config = config.normalized();
     paths::save_config(&config)?;
     Ok(config)
@@ -299,7 +362,7 @@ async fn checkin_one(id: String) -> Value {
 
 #[tauri::command]
 async fn checkin_all(app: tauri::AppHandle) -> Value {
-    run_cycle(Some(app)).await
+    run_cycle(Some(app), false).await
 }
 
 // ---------------------------------------------------------------------------
@@ -404,8 +467,16 @@ async fn switch_to_account(
     restart: bool,
     keep_session: bool,
     credits_only: Option<bool>,
+    force: Option<bool>,
 ) -> Result<Value, String> {
-    switch::switch_account(&id, restart, keep_session, credits_only.unwrap_or(false)).await
+    switch::switch_account(
+        &id,
+        restart,
+        keep_session,
+        credits_only.unwrap_or(false),
+        force.unwrap_or(false),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +610,81 @@ async fn growth_run_all() -> Value {
         "items": items,
         "finishedAt": paths::now_ms(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// 待体验任务
+//
+// 成长中心的「体验类」任务（召唤某个专家对话一次、读一篇文档…）没法由接口代做：
+// 进度只随客户端里的真实行为增长。能自动做的是三件：接取任务、把待办列出来、
+// 做完之后把奖励领掉。这里负责中间那件——把清单交给界面，一键跳到对应页面。
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn growth_pending() -> Value {
+    let accounts = store::load_accounts();
+    let mut items = Vec::with_capacity(accounts.len());
+
+    for (index, account) in accounts.iter().enumerate() {
+        if index > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+        let outcome = growth::pending_only(account).await;
+        items.push(json!({
+            "id": store::get_str(account, "id"),
+            "label": display_name(account),
+            "ok": outcome.get("ok").and_then(Value::as_bool).unwrap_or(false),
+            "message": outcome.get("message").cloned().unwrap_or(Value::Null),
+            "tasks": outcome.get("pending").cloned().unwrap_or_else(|| json!([])),
+        }));
+    }
+
+    json!({ "accounts": items })
+}
+
+/// 打开一个链接（客户端 deeplink 或站内地址）。只放行这两种，避免变成任意命令入口。
+#[tauri::command]
+fn open_link(url: String) -> Result<(), String> {
+    let target = url.trim();
+    if !(target.starts_with("workbuddy://") || target.starts_with("https://www.workbuddy.cn/")) {
+        return Err("只允许打开客户端链接与 workbuddy.cn 站内地址".to_string());
+    }
+    std::process::Command::new("open")
+        .arg(target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// 辅助功能驱动（界面自动化）
+//
+// 只用于把「召唤专家」这类必须发生在客户端里的动作替你点一下。授权归用户所有，
+// 未授权时本模块只回报状态，不做任何事。
+// ---------------------------------------------------------------------------
+
+/// 授权与客户端存活状态。
+#[tauri::command]
+fn ax_status() -> Value {
+    axdrive::status()
+}
+
+/// dump 客户端窗口树，写 `~/.wb-checkin/ax-dump.txt`。
+#[tauri::command]
+fn ax_probe() -> Result<Value, String> {
+    axdrive::probe()
+}
+
+/// 跳到系统设置的辅助功能面板。
+#[tauri::command]
+fn ax_open_settings() -> Result<(), String> {
+    axdrive::open_settings()
+}
+
+/// 弹一次系统授权提示，再回到当前状态。
+#[tauri::command]
+fn ax_request_trust() -> Value {
+    axdrive::request_trust()
 }
 
 // ---------------------------------------------------------------------------
@@ -946,7 +1092,7 @@ fn tray_menu_event(app: &AppHandle, event: MenuEvent) {
             // 菜单回调是同步的，签到要发网络请求，丢到异步运行时里跑
             let handle = app.clone();
             tauri::async_runtime::spawn(async move {
-                let _ = run_cycle(Some(handle)).await;
+                let _ = run_cycle(Some(handle), false).await;
             });
         }
         "quit" => {
@@ -980,6 +1126,9 @@ pub fn run() {
     let app = tauri::Builder::default()
         .setup(|app| {
             let _ = paths::ensure_private_dir(&paths::data_dir());
+            // 界面树 dump 可能上千行，别放在主线程里拖慢启动。
+            std::thread::spawn(axdrive::startup_check);
+            axdrive::spawn_watcher();
             build_tray(app.handle())?;
             // 菜单栏指标要跟着托盘一起活：窗口收起后仍要每秒刷新。
             sysmon::spawn(app.handle().clone());
@@ -1037,6 +1186,12 @@ pub fn run() {
             current_identity,
             growth_run_one,
             growth_run_all,
+            growth_pending,
+            open_link,
+            ax_status,
+            ax_probe,
+            ax_open_settings,
+            ax_request_trust,
             usage_cached,
             fetch_usage_all,
             local_ai_status,

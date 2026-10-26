@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as api from "./api";
+import type { AxStatus } from "./api";
 import type {
   Account,
   AppConfig,
@@ -8,6 +10,7 @@ import type {
   CreditItem,
   CurrentIdentity,
   LogRecord,
+  PendingAccount,
   StorePaths,
   SysMetrics,
   UsageSummary,
@@ -73,8 +76,10 @@ const INITIAL_CONFIG: AppConfig = {
   auto_enabled: true,
   backup_hour: 12,
   backup_minute: 0,
+  auto_growth: true,
   local_ai: { enabled: false, log_dir: "", smctemp_path: "", services: [] },
   menubar_items: ["net", "disk"],
+  free_model: "hy3",
 };
 
 /** 菜单栏可勾选的指标。顺序与后端 `sysmon::ITEMS` 一致。 */
@@ -107,6 +112,16 @@ export default function App() {
 
   // 成长中心（旅行/盲盒/任务领奖）与积分趋势
   const [growthRunning, setGrowthRunning] = useState(false);
+  /**
+   * 待体验任务：进度没达标的体验类任务。这类任务要靠客户端里的真实行为推进，
+   * 接口代不了，所以这里只做「列出来 + 一键跳过去」。
+   */
+  const [pending, setPending] = useState<PendingAccount[]>([]);
+  const [pendingLoading, setPendingLoading] = useState(false);
+  /** 防并发：窗口聚焦与签到回调可能在拉取途中再次触发。 */
+  const pendingInflight = useRef(false);
+  /** 待体验面板当前看的是哪个账号。null = 用清单里第一个有任务的账号。 */
+  const [pendingTab, setPendingTab] = useState<string | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
@@ -121,6 +136,15 @@ export default function App() {
    * 的是同一份读数，不会出现两处数字对不上。
    */
   const [sys, setSys] = useState<SysMetrics | null>(null);
+
+  /**
+   * 界面自动化的授权状态。辅助功能只能在系统设置里授，所以这里只显示实况 +
+   * 提供「去授权」按钮，不在前端做任何猜测。
+   */
+  const [ax, setAx] = useState<AxStatus | null>(null);
+  const [axProbing, setAxProbing] = useState(false);
+  /** 授权期间的轮询句柄。用户勾完系统设置那一刻我们要知道。 */
+  const axPollRef = useRef<number | null>(null);
 
   // 传给子组件的回调要稳定，否则会反复触发依赖它的 effect
   const showError = useCallback((text: string) => setBanner({ kind: "danger", text }), []);
@@ -139,6 +163,35 @@ export default function App() {
     setPaths(storePaths);
     setIdentity(who);
   }, []);
+
+  /** 拉一次待体验任务清单。失败不打扰：它只是辅助信息，签到本身不受影响。 */
+  const loadPending = useCallback(async (silent = false) => {
+    // 聚焦与签到回调可能撞在一起，同一次没回来之前不重复打接口
+    if (pendingInflight.current) return;
+    pendingInflight.current = true;
+    if (!silent) setPendingLoading(true);
+    try {
+      const result = await api.growthPending();
+      setPending(result.accounts);
+    } catch {
+      // 忽略：账号不可用或网络异常时保持上一次的清单
+    } finally {
+      pendingInflight.current = false;
+      if (!silent) setPendingLoading(false);
+    }
+  }, []);
+
+  /**
+   * 待体验面板只显示一个账号：顶部一排账号胶囊切换，避免两个号的清单连成一片。
+   * 没选过（或选中的账号已无待办）时落到第一个有任务的账号。
+   */
+  const pendingKeyOf = (item: PendingAccount) => item.id ?? item.label;
+  const pendingAccounts = pending.filter((item) => item.tasks.length > 0);
+  const activePending =
+    pendingAccounts.find((item) => pendingKeyOf(item) === pendingTab) ?? pendingAccounts[0] ?? null;
+  const activePendingKey = activePending ? pendingKeyOf(activePending) : null;
+  const pendingRewardTotal = (item: PendingAccount) =>
+    item.tasks.reduce((sum, task) => sum + (task.reward || 0), 0);
 
   /** 一次查完所有账号。只读操作，不消耗积分、不影响签到。 */
   const loadCreditsAll = useCallback(async () => {
@@ -203,6 +256,7 @@ export default function App() {
     } finally {
       setGrowthRunning(false);
       await refresh().catch(() => undefined);
+      await loadPending().catch(() => undefined);
     }
   };
 
@@ -264,6 +318,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    api.axStatus().then(setAx).catch(() => undefined);
+    return () => {
+      if (axPollRef.current !== null) window.clearInterval(axPollRef.current);
+      axPollRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
     // 先用上次的缓存渲染，避免首屏空着；随后再拉一次最新
     api
       .usageCached()      .then((cached) => {
@@ -281,6 +343,7 @@ export default function App() {
       .then(() => loadCreditsAll())
       .catch((error) => setBanner({ kind: "danger", text: String(error) }));
     refreshUsage().catch(() => undefined);
+    loadPending().catch(() => undefined);
   }, [refresh, loadCreditsAll, refreshUsage]);
 
   useEffect(() => {
@@ -291,12 +354,38 @@ export default function App() {
       listen<CheckinSummary>("checkin://finished", () => {
         setProgress(null);
         refresh().catch(() => undefined);
+        // 签到会顺手把已完成任务的奖励领掉，领完立刻同步待体验，已领的不再挂着
+        loadPending().catch(() => undefined);
       }),
     ];
     return () => {
       subscriptions.forEach((pending) => pending.then((unlisten) => unlisten()));
     };
-  }, [refresh]);
+  }, [refresh, loadPending]);
+
+  /**
+   * 回到面板就静默同步一次待体验。
+   *
+   * 领奖可能发生在客户端里（点「去体验」做完后在客户端领，或直接领），wb-checkin
+   * 感知不到那一刻；等窗口重新拿到焦点再拉一次，已领取的任务自然从清单里消失。
+   */
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (focused) loadPending(true).catch(() => undefined);
+      })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [loadPending]);
 
   const today = todayLocal();
 
@@ -333,6 +422,8 @@ export default function App() {
       setRunning(false);
       setProgress(null);
       await refresh().catch(() => undefined);
+      // 签到顺手领奖后，待体验里已领的条目要立即消失
+      await loadPending().catch(() => undefined);
     }
   };
 
@@ -349,6 +440,7 @@ export default function App() {
     } finally {
       setBusyId(null);
       await refresh().catch(() => undefined);
+      await loadPending().catch(() => undefined);
     }
   };
 
@@ -367,10 +459,102 @@ export default function App() {
 
   const toggleAuto = async (next: boolean) => {
     try {
-      const saved = await api.setConfig(next, config.backup_hour, config.backup_minute);
+      const saved = await api.setConfig(
+        next,
+        config.backup_hour,
+        config.backup_minute,
+        config.auto_growth,
+      );
       setConfigState(saved);
     } catch (error) {
       setBanner({ kind: "danger", text: String(error) });
+    }
+  };
+
+  /** 自动签到之后再顺手跑成长中心（旅行 + 任务），可以单独关掉。 */
+  const toggleGrowth = async (next: boolean) => {
+    try {
+      const saved = await api.setConfig(
+        config.auto_enabled,
+        config.backup_hour,
+        config.backup_minute,
+        next,
+      );
+      setConfigState(saved);
+    } catch (error) {
+      setBanner({ kind: "danger", text: String(error) });
+    }
+  };
+
+  /** 自动处理新建会话前先切到这个模型 —— 走流程的对话没必要花额度。 */
+  const changeFreeModel = async (value: string) => {
+    try {
+      const saved = await api.setConfig(
+        config.auto_enabled,
+        config.backup_hour,
+        config.backup_minute,
+        config.auto_growth,
+        value,
+      );
+      setConfigState(saved);
+    } catch (error) {
+      setBanner({ kind: "danger", text: String(error) });
+    }
+  };
+
+  /** 重新读一次辅助功能授权状态。授权之后不会自动生效，得用户点一下刷新。 */
+  const refreshAx = async () => {
+    try {
+      setAx(await api.axStatus());
+    } catch {
+      // 忽略：状态查不到不影响其他功能
+    }
+  };
+
+  /** 弹系统授权提示，并把系统设置停在「辅助功能」页。 */
+  const grantAx = async () => {
+    try {
+      setAx(await api.axRequestTrust());
+    } catch (error) {
+      setBanner({ kind: "danger", text: String(error) });
+    }
+    // 用户是在系统设置里勾选，勾完那一刻程序并不知道。这里最多盯 60 秒，
+    // 一旦授权到位就顺手探一次界面 —— 否则还得让人回来再点两下。
+    if (axPollRef.current !== null) return;
+    let left = 30;
+    axPollRef.current = window.setInterval(async () => {
+      left -= 1;
+      const next = await api.axStatus().catch(() => null);
+      if (next && next.windows > 0) {
+        if (axPollRef.current !== null) window.clearInterval(axPollRef.current);
+        axPollRef.current = null;
+        setAx(next);
+        await probeAx();
+        return;
+      }
+      if (left <= 0) {
+        if (axPollRef.current !== null) window.clearInterval(axPollRef.current);
+        axPollRef.current = null;
+      }
+    }, 2000);
+  };
+
+  /** dump 客户端界面树，用于确认自动化能认到哪些控件。 */
+  const probeAx = async () => {
+    setAxProbing(true);
+    try {
+      const result = await api.axProbe();
+      setBanner({
+        kind: result.windows > 0 ? "ok" : "danger",
+        text:
+          result.windows > 0
+            ? `认到 ${result.windows} 个窗口，界面树 ${result.lines} 行已写到 ${result.path}`
+            : `读不到客户端窗口（界面树 ${result.lines} 行）。通常是辅助功能授权还没生效。`,
+      });
+    } catch (error) {
+      setBanner({ kind: "danger", text: String(error) });
+    } finally {
+      setAxProbing(false);
     }
   };
 
@@ -381,7 +565,12 @@ export default function App() {
       return;
     }
     try {
-      const saved = await api.setConfig(config.auto_enabled, parsed.hour, parsed.minute);
+      const saved = await api.setConfig(
+        config.auto_enabled,
+        parsed.hour,
+        parsed.minute,
+        config.auto_growth,
+      );
       setConfigState(saved);
     } catch (error) {
       setBanner({ kind: "danger", text: String(error) });
@@ -525,6 +714,92 @@ export default function App() {
           )}
         </div>
 
+        {pendingAccounts.length > 0 && (
+          <>
+            <div className="section-head">
+              <h2>待体验</h2>
+              <div className="head-tools">
+                {activePending && (
+                  <span className="head-meta">
+                    {activePending.tasks.length} 项 · +{pendingRewardTotal(activePending)} 积分
+                  </span>
+                )}
+                <button
+                  className="btn sm"
+                  onClick={() => loadPending()}
+                  disabled={pendingLoading}
+                  title="重新拉取各账号的待体验任务"
+                >
+                  {pendingLoading && <span className="spin" />}
+                  {pendingLoading ? "刷新中" : "刷新"}
+                </button>
+              </div>
+            </div>
+            <div className="panel task-panel">
+              {pendingAccounts.length > 1 && (
+                <div className="task-tabs" role="tablist">
+                  {pendingAccounts.map((item) => {
+                    const key = item.id ?? item.label;
+                    return (
+                      <button
+                        key={key}
+                        role="tab"
+                        aria-selected={activePendingKey === key}
+                        className={`task-tab${activePendingKey === key ? " active" : ""}`}
+                        onClick={() => setPendingTab(key)}
+                      >
+                        {item.label}
+                        <span className="task-tab-count">{item.tasks.length}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {activePending ? (
+                <div className="task-list">
+                  {activePending.tasks.map((task) => (
+                    <div className="task-row" key={task.code}>
+                      <div className="task-main">
+                        <div className="task-title">
+                          <span className="task-name">{task.title}</span>
+                          {task.target > 1 && (
+                            <span className="task-progress">
+                              {task.current}/{task.target}
+                            </span>
+                          )}
+                        </div>
+                        {task.description && (
+                          <div className="task-desc" title={task.description}>
+                            {task.description}
+                          </div>
+                        )}
+                      </div>
+                      <span className="task-reward">+{task.reward}</span>
+                      <button
+                        className="btn sm"
+                        disabled={!task.jumpUrl}
+                        onClick={() =>
+                          api.openLink(task.jumpUrl).catch((error) => showError(String(error)))
+                        }
+                      >
+                        去体验
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="hint">这个账号暂时没有待体验任务。</div>
+              )}
+
+              <div className="task-foot">
+                这些任务要在客户端里真用一次才算完成（召唤专家对话、读文档…），接口代不了。
+                点「去体验」直接跳到对应页面，做完后下一轮签到会自动把奖励领掉。
+              </div>
+            </div>
+          </>
+        )}
+
         <div className="section-head">
           <h2>积分趋势</h2>
           <button
@@ -653,6 +928,76 @@ export default function App() {
           </div>
           <div className="row">
             <div>
+              <div className="row-label">顺手处理成长中心</div>
+              <div className="row-hint">
+                自动签到之后，为该账号领取旅行奖励并再次出发、接取未报名的任务、领取可领的
+                任务奖励；没做完的体验任务会列在上方「待体验」里，点一下就能跳过去。
+                只做这些，「盲盒」不在此范围内 —— 抽奖次数有限，留给你自己在「今日全领」里点。
+              </div>
+            </div>
+            <button
+              className="switch"
+              data-on={config.auto_growth}
+              aria-label="切换成长中心自动处理"
+              disabled={!config.auto_enabled}
+              onClick={() => toggleGrowth(!config.auto_growth)}
+            />
+          </div>
+          <div className="row">
+            <div>
+              <div className="row-label">界面自动化</div>
+              <div className="row-hint">
+                「召唤专家」这类体验任务只有在客户端界面里真的说上一句才算数，接口代不了。
+                授权「辅助功能」之后，程序可以替你打开专家页并发送一句话。
+                <br />
+                当前：
+                {ax === null
+                  ? "检查中"
+                  : ax.windows > 0
+                    ? "可用"
+                    : ax.trusted
+                      ? "已勾选但读不到界面，重启客户端再试"
+                      : "未授权"}
+                {ax?.clientPid ? `　客户端 ${ax.clientPid} 正在运行` : "　客户端未运行"}
+              </div>
+            </div>
+            <div className="row-actions">
+              <button className="btn sm" onClick={probeAx} disabled={axProbing}>
+                {axProbing ? "探测中" : "探测界面"}
+              </button>
+              {ax && ax.windows > 0 ? (
+                <button className="btn sm ghost" onClick={refreshAx}>
+                  刷新
+                </button>
+              ) : (
+                <button className="btn sm primary" onClick={grantAx}>
+                  去授权
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="row">
+            <div>
+              <div className="row-label">新建会话用免费模型</div>
+              <div className="row-hint">
+                体验类任务只是走个流程，用付费模型纯属浪费额度。自动处理开始前会先切到这一档，
+                切完再新建会话。Hy3 标价 0.00x（限时免费）；Hy4 preview 只在夜间免费，白天照样计费。
+              </div>
+            </div>
+            <div className="row-actions">
+              <select
+                className="select"
+                value={config.free_model}
+                onChange={(event) => changeFreeModel(event.target.value)}
+              >
+                <option value="hy3">Hy3（限时免费）</option>
+                <option value="hy4">Hy4 preview（夜间免费）</option>
+                <option value="">不切换</option>
+              </select>
+            </div>
+          </div>
+          <div className="row">
+            <div>
               <div className="row-label">后台常驻</div>
               <div className="row-hint">
                 点窗口的关闭按钮不会退出程序，窗口会收起来、程序继续在右上角菜单栏跑，
@@ -698,10 +1043,20 @@ export default function App() {
                 <span className="msg">{record.message}</span>
                 <span
                   className={`verdict ${
-                    record.result === "error" ? "danger" : record.result === "already" ? "warn" : "ok"
+                    record.result === "error"
+                      ? "danger"
+                      : record.result === "already"
+                        ? "warn"
+                        : "ok"
                   }`}
                 >
-                  {record.result === "error" ? "失败" : record.result === "already" ? "已签过" : "成功"}
+                  {record.result === "error"
+                    ? "失败"
+                    : record.result === "already"
+                      ? "已签过"
+                      : record.result === "growth"
+                        ? "成长"
+                        : "成功"}
                 </span>
               </div>
             ))
