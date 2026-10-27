@@ -157,6 +157,18 @@ fn ensure_dir() -> Result<(), String> {
     Ok(())
 }
 
+/// 以「私有」方式打开一个追加写文件。
+///
+/// unix 上是 0600（日志里有 sidecar 的转发口令片段，不能让同机其他用户读到）；
+/// Windows 没有模式位，靠用户配置目录本身的 ACL，多给一个 mode 参数编译都过不去。
+fn open_append_private(path: PathBuf) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path)
+}
+
 /// 首次接管独立版 OC Ferry 的现场。
 ///
 /// 最关键的是 `api-key`：`models.json` 里已导入的条目带着旧口令，换一把新口令就会
@@ -432,11 +444,7 @@ async fn start_inner() -> Result<Value, String> {
     migrate_legacy_state();
     let node = resolve_node()?;
     let sidecar = sidecar_dir()?;
-    let log = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(log_file())
+    let log = open_append_private(log_file())
         .map_err(|error| format!("打开日志失败：{error}"))?;
     let log_err = log.try_clone().map_err(|error| error.to_string())?;
 
@@ -637,11 +645,7 @@ pub fn autostart_on_launch() {
     tauri::async_runtime::spawn(async {
         if let Err(error) = start().await {
             // 自动拉起失败不应该影响签到主流程，只留一条日志。
-            let _ = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .mode(0o600)
-                .open(log_file())
+            let _ = open_append_private(log_file())
                 .and_then(|mut file| writeln!(file, "[autostart] {error}"));
         }
     });
@@ -651,6 +655,7 @@ pub fn autostart_on_launch() {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn data_dir_is_private() {
         ensure_dir().unwrap();

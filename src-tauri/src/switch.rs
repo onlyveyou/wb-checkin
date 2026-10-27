@@ -19,27 +19,117 @@ use crate::paths::{data_dir, now_ms};
 use crate::store;
 
 /// 官方客户端 bundle id，用于 osascript 优雅退出。
+#[cfg(target_os = "macos")]
 const CLIENT_BUNDLE_ID: &str = "com.tencent.workbuddy.mac";
 /// 主进程命令行特征。用完整路径而非可执行名（`Electron`）匹配，
 /// 避免误伤同机其它 Electron 应用。
+#[cfg(target_os = "macos")]
 const MAIN_PROCESS_PATTERN: &str = "/Applications/WorkBuddy.app/Contents/MacOS/Electron";
 /// 包内辅助进程特征（GPU/渲染/网络等）。
+#[cfg(target_os = "macos")]
 const HELPER_PROCESS_PATTERN: &str = "WorkBuddy Helper";
 /// 客户端安装路径候选。
+#[cfg(target_os = "macos")]
 const CLIENT_APP_PATHS: &[&str] = &[
     "/Applications/WorkBuddy.app",
     "/Applications/CodeBuddy CN.app",
 ];
 
+/// 官方登录态文件在「用户数据根」下的相对路径。
+///
+/// 客户端是 Electron 应用，macOS 与 Windows 都把这份数据放在各自的用户数据根下，
+/// 内部层级保持一致，所以只有根目录不同。
+const AUTH_SUBPATH: &str = "Data/Public/auth/workbuddy-desktop.info";
+
+/// 可能的客户端数据目录名。客户端改名/换发行版时全落空，这时靠 Windows 侧的
+/// 目录扫描兜底（见 `scan_data_root_for_auth`），或用户在设置里手填。
+const CLIENT_DATA_DIRS: &[&str] = &[
+    "CodeBuddyExtension",
+    "WorkBuddy",
+    "workbuddy",
+    "CodeBuddy CN",
+    "CodeBuddy",
+];
+
 fn home_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+    crate::paths::home_dir()
+}
+
+/// 用户数据根：macOS 是 `~/Library/Application Support`，Windows 是 `%APPDATA%`。
+#[cfg(target_os = "macos")]
+fn user_data_root() -> PathBuf {
+    home_dir().join("Library/Application Support")
+}
+
+#[cfg(target_os = "windows")]
+fn user_data_root() -> PathBuf {
+    std::env::var("APPDATA")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join("AppData").join("Roaming"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn user_data_root() -> PathBuf {
+    home_dir().join(".local").join("share")
+}
+
+/// 登录态文件的候选路径（按优先级）。
+fn auth_file_candidates() -> Vec<PathBuf> {
+    let root = user_data_root();
+    CLIENT_DATA_DIRS
+        .iter()
+        .map(|dir| root.join(dir).join(AUTH_SUBPATH))
+        .collect()
+}
+
+/// Windows：客户端的数据目录名无法先验确定，扫一遍用户数据根下的一级目录，
+/// 看谁的 `Data/Public/auth/workbuddy-desktop.info` 存在。
+///
+/// 只读目录项，不读文件内容；`%APPDATA%` 下通常几十个目录，开销可忽略。
+#[cfg(target_os = "windows")]
+fn scan_data_root_for_auth() -> Option<PathBuf> {
+    let root = user_data_root();
+    let entries = std::fs::read_dir(&root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let candidate = path.join(AUTH_SUBPATH);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// 官方登录态文件路径。
+///
+/// 解析顺序：设置里手填的路径 → 已知数据目录名里存在的那个 → Windows 目录扫描 →
+/// 第一个候选（用于尚未登录过、需要提示用户先登录的场景）。
 pub fn auth_file_path() -> PathBuf {
-    home_dir()
-        .join("Library/Application Support/CodeBuddyExtension/Data/Public/auth")
-        .join("workbuddy-desktop.info")
+    let custom = crate::paths::load_config().client_auth_file;
+    if !custom.trim().is_empty() {
+        return crate::paths::expand_tilde(&custom);
+    }
+
+    let candidates = auth_file_candidates();
+    if let Some(found) = candidates.iter().find(|path| path.exists()) {
+        return found.clone();
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Some(found) = scan_data_root_for_auth() {
+        return found;
+    }
+
+    candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| home_dir().join(AUTH_SUBPATH))
 }
 
 /// 切换前的备份目录。
@@ -47,11 +137,101 @@ fn backup_dir() -> PathBuf {
     data_dir().join("backups")
 }
 
+/// 客户端程序路径。
+///
+/// 设置里手填优先；否则 macOS 查 `/Applications`，Windows 扫
+/// `%LOCALAPPDATA%` / `%ProgramFiles%` 下的两层目录（Electron 应用通常装在
+/// `...\Programs\<应用名>\<应用名>.exe`）。
 fn client_app_path() -> Option<PathBuf> {
-    CLIENT_APP_PATHS
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.exists())
+    let custom = crate::paths::load_config().client_app_path;
+    if !custom.trim().is_empty() {
+        let path = crate::paths::expand_tilde(&custom);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return CLIENT_APP_PATHS
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.exists());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return scan_windows_for_client();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        None
+    }
+}
+
+/// Windows：扫常见安装根目录找客户端 exe。
+#[cfg(target_os = "windows")]
+fn scan_windows_for_client() -> Option<PathBuf> {
+    const EXE_NAMES: &[&str] = &["WorkBuddy.exe", "CodeBuddy.exe", "CodeBuddy CN.exe"];
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for key in ["LOCALAPPDATA", "PROGRAMFILES", "ProgramFiles(x86)", "APPDATA"] {
+        if let Ok(value) = std::env::var(key) {
+            if !value.trim().is_empty() {
+                roots.push(PathBuf::from(value));
+            }
+        }
+    }
+
+    for root in roots {
+        // 直接落在根目录下
+        for name in EXE_NAMES {
+            let direct = root.join(name);
+            if direct.exists() {
+                return Some(direct);
+            }
+        }
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let first = entry.path();
+            if !first.is_dir() {
+                continue;
+            }
+            // 一层：<root>\WorkBuddy\WorkBuddy.exe
+            for name in EXE_NAMES {
+                let candidate = first.join(name);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+            // 两层：<root>\Programs\WorkBuddy\WorkBuddy.exe
+            let Ok(inner) = std::fs::read_dir(&first) else {
+                continue;
+            };
+            for child in inner.flatten() {
+                let second = child.path();
+                if !second.is_dir() {
+                    continue;
+                }
+                for name in EXE_NAMES {
+                    let candidate = second.join(name);
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Windows 上客户端进程的可执行名。
+#[cfg(target_os = "windows")]
+fn client_process_names() -> &'static [&'static str] {
+    &["WorkBuddy.exe", "CodeBuddy.exe", "CodeBuddy CN.exe"]
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +289,7 @@ fn run_cmd(program: &str, args: &[&str], timeout_secs: u64) -> Option<std::proce
     })
 }
 
+#[cfg(target_os = "macos")]
 fn matching_pids(pattern: &str) -> Vec<String> {
     run_cmd("pgrep", &["-f", pattern], 5)
         .map(|output| {
@@ -123,10 +304,35 @@ fn matching_pids(pattern: &str) -> Vec<String> {
 }
 
 /// 客户端主进程是否在运行。
+#[cfg(target_os = "macos")]
 pub fn client_running() -> bool {
     !matching_pids(MAIN_PROCESS_PATTERN).is_empty()
 }
 
+/// Windows：按可执行名查 tasklist。
+///
+/// 不匹配完整路径——Electron 的渲染/GPU 子进程都是同一个 exe 名，
+/// 按名判断「在跑」正好覆盖主进程与全部辅助进程。
+#[cfg(target_os = "windows")]
+pub fn client_running() -> bool {
+    for name in client_process_names() {
+        let filter = format!("IMAGENAME eq {name}");
+        if let Some(output) = run_cmd("tasklist", &["/FI", filter.as_str(), "/NH"], 8) {
+            let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            if text.contains(&name.to_lowercase()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn client_running() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
 fn wait_for_processes_gone(pattern: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -143,6 +349,7 @@ fn wait_for_processes_gone(pattern: &str, timeout: Duration) -> bool {
 /// 关闭客户端：先 osascript 优雅退出，再清理包内残留进程。
 ///
 /// 切换与「保存现场」共用：两处都要求客户端完全退出后才能动 session 目录。
+#[cfg(target_os = "macos")]
 pub(crate) fn close_client(timeout_secs: u64) -> Result<(), String> {
     if !client_running() {
         return Ok(());
@@ -174,6 +381,52 @@ pub(crate) fn close_client(timeout_secs: u64) -> Result<(), String> {
     ))
 }
 
+/// Windows：先 `taskkill`（不带 /F，发 WM_CLOSE 让客户端自己收尾），
+/// 等不到退出再强杀。`/T` 一并结束渲染与 GPU 子进程。
+#[cfg(target_os = "windows")]
+pub(crate) fn close_client(timeout_secs: u64) -> Result<(), String> {
+    if !client_running() {
+        return Ok(());
+    }
+
+    for name in client_process_names() {
+        let _ = run_cmd("taskkill", &["/IM", name, "/T"], 15);
+    }
+    if wait_gone(Duration::from_secs(8)) {
+        return Ok(());
+    }
+
+    for name in client_process_names() {
+        let _ = run_cmd("taskkill", &["/IM", name, "/T", "/F"], 15);
+    }
+    let budget = Duration::from_secs(timeout_secs.clamp(5, 60));
+    if wait_gone(budget) {
+        return Ok(());
+    }
+
+    Err("无法完全关闭 WorkBuddy（仍有进程存活）。请手动退出客户端后重试。".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn wait_gone(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !client_running() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(crate) fn close_client(_timeout_secs: u64) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn launch_client() -> Result<(), String> {
     let app = client_app_path().ok_or_else(|| {
         format!(
@@ -193,6 +446,25 @@ pub(crate) fn launch_client() -> Result<(), String> {
     Ok(())
 }
 
+/// Windows：直接拉起 exe。不等待——客户端启动要好几秒，切换流程没理由卡在那。
+#[cfg(target_os = "windows")]
+pub(crate) fn launch_client() -> Result<(), String> {
+    let exe = client_app_path().ok_or_else(|| {
+        "未找到 WorkBuddy 客户端。请在设置里手填客户端程序路径（WorkBuddy.exe）后重试。"
+            .to_string()
+    })?;
+
+    std::process::Command::new(&exe)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("启动 WorkBuddy 失败：{error}"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(crate) fn launch_client() -> Result<(), String> {
+    Err("当前平台不支持启动客户端".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // 登录态文件读写
 // ---------------------------------------------------------------------------
@@ -204,10 +476,16 @@ fn read_json(path: &Path) -> Option<Value> {
 
 fn permission_hint(error: &std::io::Error) -> String {
     if error.kind() == std::io::ErrorKind::PermissionDenied {
-        "无权限写入官方登录态文件。请到「系统设置 → 隐私与安全性 → App 管理」允许本 App 控制 WorkBuddy 的数据后重试。".to_string()
-    } else {
-        format!("写入官方登录态文件失败：{error}")
+        #[cfg(target_os = "macos")]
+        {
+            return "无权限写入官方登录态文件。请到「系统设置 → 隐私与安全性 → App 管理」允许本 App 控制 WorkBuddy 的数据后重试。".to_string();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            return "无权限写入官方登录态文件。客户端正在运行时该文件会被占用，请先完全退出 WorkBuddy 再重试（必要时以管理员身份运行本程序）。".to_string();
+        }
     }
+    format!("写入官方登录态文件失败：{error}")
 }
 
 /// 原子写：写临时文件 → 继承原文件权限 → rename。

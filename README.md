@@ -1,6 +1,6 @@
 # WB 签到
 
-WorkBuddy / CodeBuddy 多账号每日自动签到 —— macOS 桌面应用（Tauri v2 + React）。
+WorkBuddy / CodeBuddy 多账号每日自动签到 —— macOS 与 Windows 桌面应用（Tauri v2 + React）。
 
 自己写的版本，只做四件事：**多账号管理 + 每日自动签到 + 积分查询与账号切换 + 本地 AI 监控（可选）**。另有一个可选的**模型摆渡**：把 OpenCode 的免费模型接进 WorkBuddy，见下。不做会话复制、Token 统计。
 
@@ -8,9 +8,9 @@ WorkBuddy / CodeBuddy 多账号每日自动签到 —— macOS 桌面应用（Ta
 
 ## 安装
 
-三种方式任选其一。共同前提：macOS 10.15+，当前分发包**仅 arm64（Apple 芯片）**。
+macOS 与 Windows 分开看。macOS 需要 10.15+，当前分发包**仅 arm64（Apple 芯片）**；Windows 为 64 位安装包。
 
-**方式一：终端安装（推荐）**
+**macOS · 方式一：终端安装（推荐）**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/onlyveyou/wb-checkin/main/install.sh | bash
@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/onlyveyou/wb-checkin/main/install.s
 
 脚本会从最新 Release 取 dmg、装进 `/Applications`、清掉隔离属性；可重复执行，覆盖旧版前会先退出正在运行的进程。**走终端下载不会被 Gatekeeper 拦住** —— 加隔离属性的是浏览器、AirDrop、微信、邮件，`curl` 不加。
 
-**方式二：手动下载 dmg**
+**macOS · 方式二：手动下载 dmg**
 
 到 [Releases](https://github.com/onlyveyou/wb-checkin/releases/latest) 下载 `WB-Checkin-<版本>-arm64.dmg`。本包**没有 Apple 开发者签名**，经浏览器下载后首次双击会提示「已损坏」，先执行一次再打开：
 
@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/onlyveyou/wb-checkin/main/install.s
 sudo xattr -cr /Applications/WB-Checkin.app
 ```
 
-**方式三：自己编译**（产物没有隔离属性，也就用不着签名）
+**macOS · 方式三：自己编译**（产物没有隔离属性，也就用不着签名）
 
 需要 Node 18+ 与 Rust 工具链。Intel 机器走这条：
 
@@ -35,6 +35,24 @@ git clone https://github.com/onlyveyou/wb-checkin.git && cd wb-checkin
 npm install && npm run app:build
 # Intel / 通用二进制：npm run app:build -- --target universal-apple-darwin
 ```
+
+**Windows：安装包**
+
+到 [Releases](https://github.com/onlyveyou/wb-checkin/releases/latest) 下载 `WB-Checkin_<版本>_x64-setup.exe` 双击安装。同样**没有代码签名证书**，首次运行 SmartScreen 会提示「Windows 已保护你的电脑」→ 点**更多信息** → **仍要运行**。安装包由 GitHub Actions 的 Windows runner 产出。
+
+也可以自己编译（在 Windows 上执行，需要 Node 18+ 与 Rust MSVC 工具链）：
+
+```powershell
+git clone https://github.com/onlyveyou/wb-checkin.git; cd wb-checkin
+npm install
+npx tauri build --bundles nsis
+```
+
+Windows 版与 macOS 版功能一致，差别只在系统集成：
+
+- **托盘**：Windows 的系统托盘只有 16×16 图标、没有文字区，所以硬盘 / CPU / 内存 / 网速改在**悬停气泡**和**右键菜单**里显示（macOS 是直接写在菜单栏上）。左键点图标弹面板，右键出菜单。
+- **界面自动化**：Windows 用系统自带的 UI Automation，不需要授权；只要客户端窗口开着就能用。
+- **客户端路径**：Windows 上官方的数据目录名无从预知，设置页里留了手填入口（留空即自动探测）。
 
 > **免责声明（下载、安装或使用即视为已阅读并同意全部条款）**
 >

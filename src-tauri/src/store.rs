@@ -268,24 +268,10 @@ pub fn add_manual(
 // 从官方本机登录态导入
 // ---------------------------------------------------------------------------
 
+/// 官方登录态文件路径。与切换模块共用同一套探测逻辑（含手填覆盖），
+/// 避免两处各猜一份、导入与切换指向不同文件。
 fn auth_file_path() -> std::path::PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        return crate::paths::home_dir()
-            .join("Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info");
-    }
-    // Windows 客户端的登录态目录按 Electron 的 %APPDATA% 布局探测；实测确认后可收窄。
-    #[cfg(not(target_os = "macos"))]
-    {
-        let root = std::env::var("APPDATA")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| crate::paths::home_dir());
-        root.join("CodeBuddyExtension")
-            .join("Data")
-            .join("Public")
-            .join("auth")
-            .join("workbuddy-desktop.info")
-    }
+    crate::switch::auth_file_path()
 }
 
 /// 把官方认证文件里的一条记录转成账号记录。

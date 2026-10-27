@@ -46,6 +46,10 @@ export interface AppConfig {
   menubar_items: string[];
   /** 界面自动化新建会话前先切到的模型，空字符串表示不切。 */
   free_model: string;
+  /** 官方客户端登录态文件路径。留空 = 自动探测。 */
+  client_auth_file: string;
+  /** 客户端程序路径（macOS 是 .app，Windows 是 .exe）。留空 = 自动探测。 */
+  client_app_path: string;
 }
 
 /** 系统指标。网速与 CPU 需要两次采样求差，启动后约一秒内为 null。 */

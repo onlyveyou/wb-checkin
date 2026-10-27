@@ -528,7 +528,13 @@ pub fn status() -> Value {
             unsafe { CFRelease(app) };
         }
     }
-    json!({ "trusted": trusted, "clientPid": pid, "windows": windows })
+    json!({
+        "trusted": trusted,
+        "clientPid": pid,
+        "windows": windows,
+        // 前端据此区分平台：Windows 没有「辅助功能」授权这一步，要隐藏授权入口。
+        "platform": "macos",
+    })
 }
 
 /// 主动弹一次系统授权提示。

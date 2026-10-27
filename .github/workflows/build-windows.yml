@@ -1,0 +1,55 @@
+name: build-windows
+
+# Windows 安装包只能在 Windows 上产出（Tauri 不支持从 macOS 交叉编译）。
+# 这里用 GitHub 的 windows-latest 跑一遍：既当编译验证，也直接出 NSIS 安装包。
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # beforeBuildCommand 里已经带 `tsc && vite build`，不必单独跑前端构建。
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Build NSIS installer
+        run: npx tauri build --bundles nsis
+
+      - name: Show bundle output
+        run: dir src-tauri\target\release\bundle\nsis
+        shell: cmd
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wb-checkin-windows
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      # 打 tag 推上来时顺手挂到同名 Release 上（与 macOS 的 dmg 并列）。
+      - name: Attach installer to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src-tauri/target/release/bundle/nsis/*.exe
+          fail_on_unmatched_files: true

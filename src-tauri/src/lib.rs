@@ -18,13 +18,6 @@ mod localai;
 mod logs;
 #[cfg(target_os = "macos")]
 mod menubar;
-#[cfg(not(target_os = "macos"))]
-mod menubar {
-    /// 非 macOS 平台没有 NSStatusItem，交回纯文本标题处理。
-    pub fn apply(_text: &str) -> bool {
-        false
-    }
-}
 mod oauth;
 mod paths;
 mod profile;
@@ -46,6 +39,10 @@ use tauri::{
 /// 托盘 id：菜单栏标题要按 id 找回来，改这里就够。
 pub(crate) const TRAY_ID: &str = "main-tray";
 /// 网速单独占一个菜单栏图标，避免两行文字把硬盘指标挤走。
+///
+/// 只对 macOS 有意义 —— Windows 的系统托盘没有文字区，网速改为在
+/// 气泡提示与右键菜单里显示（见 `tray_metrics_update`）。
+#[cfg(target_os = "macos")]
 pub(crate) const NET_TRAY_ID: &str = "net-tray";
 
 /// 单轮闸：签到过程会反复读改写 accounts.json，同一时刻只允许一个签到流程在跑，
@@ -302,6 +299,8 @@ fn set_config(
     backup_minute: u32,
     auto_growth: Option<bool>,
     free_model: Option<String>,
+    client_auth_file: Option<String>,
+    client_app_path: Option<String>,
 ) -> Result<paths::AppConfig, String> {
     // 先读后改：配置里还有本地 AI 监控等本命令不负责的字段，
     // 直接构造新结构会把它们重置成默认值。
@@ -314,6 +313,13 @@ fn set_config(
     }
     if let Some(free_model) = free_model {
         config.free_model = free_model;
+    }
+    // 客户端路径留空 = 自动探测，所以空字符串是有效值，不能当「未提供」跳过。
+    if let Some(client_auth_file) = client_auth_file {
+        config.client_auth_file = client_auth_file;
+    }
+    if let Some(client_app_path) = client_app_path {
+        config.client_app_path = client_app_path;
     }
     let config = config.normalized();
     paths::save_config(&config)?;
@@ -920,6 +926,9 @@ fn now_ms() -> u64 {
 /// 无边框 + 透明 + 置顶，接近系统面板观感；透明依赖 `macos-private-api`。
 /// 之所以在启动阶段就预创建，是因为 webview 需要时间加载 —— 等首次点击才建，
 /// 用户会看到空白面板一闪。预创建的窗口一直后台渲染，点开即显示。
+///
+/// Windows 上不开透明：WebView2 的透明合成要额外配置，一旦没生效圆角外就是黑边，
+/// 比「方角」难看得多。面板本身的背景色是实色的，关掉透明只是少了圆角。
 fn popover_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
         return Ok(win);
@@ -928,10 +937,10 @@ fn popover_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .title("WB 签到")
         .inner_size(POPOVER_WIDTH, POPOVER_HEIGHT)
         .decorations(false)
-        .transparent(true)
+        .transparent(cfg!(target_os = "macos"))
         .always_on_top(true)
         .resizable(false)
-        .shadow(true)
+        .shadow(cfg!(target_os = "macos"))
         .skip_taskbar(true)
         .visible(false)
         .build()
@@ -944,6 +953,7 @@ fn popover_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 /// 的结果当逻辑点去翻转 Retina 屏上的 y，算出来会掉到屏幕外。
 /// `work_area` 是权威值，且天然适配刘海屏与外接屏。
 /// x 用事件里的鼠标横坐标对齐图标中心：该字段未经那处翻转，可信。
+#[cfg(target_os = "macos")]
 fn place_popover(win: &WebviewWindow, cursor_x_physical: Option<f64>) -> tauri::Result<()> {
     let Some(monitor) = win.primary_monitor()? else {
         return Ok(());
@@ -965,6 +975,40 @@ fn place_popover(win: &WebviewWindow, cursor_x_physical: Option<f64>) -> tauri::
     win.set_position(LogicalPosition::new(
         desired.clamp(min_x, max_x),
         area.position.y as f64 / scale + POPOVER_MARGIN / 2.0,
+    ))
+}
+
+/// Windows：托盘在任务栏里，面板要贴在**可用区右下角**（也就是任务栏上沿）往上弹。
+///
+/// `work_area` 已经扣掉任务栏，所以它的下边界就是面板该贴着的那条线。
+#[cfg(not(target_os = "macos"))]
+fn place_popover(win: &WebviewWindow, cursor_x_physical: Option<f64>) -> tauri::Result<()> {
+    let Some(monitor) = win.primary_monitor()? else {
+        return Ok(());
+    };
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    let left = area.position.x as f64 / scale;
+    let right = (area.position.x as f64 + area.size.width as f64) / scale;
+    let top = area.position.y as f64 / scale;
+    let bottom = (area.position.y as f64 + area.size.height as f64) / scale;
+
+    let desired = match cursor_x_physical {
+        Some(x) => x / scale - POPOVER_WIDTH / 2.0,
+        None => right - POPOVER_WIDTH - POPOVER_MARGIN,
+    };
+    let min_x = left + POPOVER_MARGIN;
+    let max_x = (right - POPOVER_WIDTH - POPOVER_MARGIN).max(min_x);
+
+    // 面板高度随内容变（popover_resize 会改），这里按当前高度往上排
+    let height = win
+        .outer_size()
+        .map(|size| size.height as f64 / scale)
+        .unwrap_or(POPOVER_HEIGHT);
+
+    win.set_position(LogicalPosition::new(
+        desired.clamp(min_x, max_x),
+        (bottom - height - POPOVER_MARGIN).max(top),
     ))
 }
 
@@ -1047,15 +1091,16 @@ fn popover_resize(app: AppHandle, height: f64) {
     let _ = win.set_size(LogicalSize::new(POPOVER_WIDTH, h));
 }
 
-/// 建系统托盘（macOS 上是右上角菜单栏图标）。
+/// 建系统托盘。
 ///
-/// 一共两个图标：主图标放硬盘/CPU/内存，另一个只放网速。
+/// macOS 上是右上角菜单栏图标，一共两个：主图标放硬盘/CPU/内存，另一个只放网速。
 /// 网速要占两行，和硬盘挤在同一个图标里会把硬盘百分比挤到第二行去，
 /// 拆开之后两边各占一个图标位，互不影响。
 ///
 /// 左键弹自定义面板；原生菜单只留给右键 —— 面板万一没出来，右键仍能进主窗口
 /// 或退出，不至于卡死在一个没有入口的后台进程里。图标以模板图模式加载，
 /// 由系统按菜单栏深浅色自动反色。
+#[cfg(target_os = "macos")]
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     // 先建网速、后建主图标：macOS 把新的状态栏项插在左边，
     // 这样排出来才是「硬盘/CPU/内存 在左，网速在右」。
@@ -1081,7 +1126,52 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 两个图标共用同一套菜单项（各自建一份，macOS 的 NSMenu 只能挂在一个状态栏项上）。
+/// Windows：只有一个托盘图标（系统托盘没有文字区），指标显示在气泡提示与右键菜单里。
+///
+/// 图标用彩色应用图标，而不是 macOS 那张模板图 —— 模板图在 Windows 上会是一团黑。
+#[cfg(not(target_os = "macos"))]
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(tauri::include_image!("icons/32x32.png"))
+        .tooltip("WB 签到 · 后台运行中")
+        .menu(&build_tray_menu(app)?)
+        .show_menu_on_left_click(false)
+        .on_menu_event(tray_menu_event)
+        .on_tray_icon_event(tray_icon_event)
+        .build(app)?;
+
+    Ok(())
+}
+
+/// Windows 右键菜单里的两行只读指标项。
+///
+/// 存成全局是因为它们每秒都要改文字，而 `build_tray_menu` 只跑一次；
+/// 菜单项本身能 `set_text`，不必每秒重建菜单（重建会让正打开的菜单闪一下）。
+#[cfg(not(target_os = "macos"))]
+static TRAY_METRICS: std::sync::Mutex<Option<(MenuItem<tauri::Wry>, MenuItem<tauri::Wry>)>> =
+    std::sync::Mutex::new(None);
+
+/// 更新右键菜单里的指标文字。空字符串时换成占位符，免得菜单里出现空行。
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn tray_metrics_update(info: &str, net: &str) {
+    let Ok(guard) = TRAY_METRICS.lock() else {
+        return;
+    };
+    let Some((info_item, net_item)) = guard.as_ref() else {
+        return;
+    };
+    let info_text = if info.is_empty() { "硬盘 / CPU / 内存：未勾选" } else { info };
+    let net_text = if net.is_empty() {
+        "网速：未勾选".to_string()
+    } else {
+        net.replace('\n', "  ")
+    };
+    let _ = info_item.set_text(info_text);
+    let _ = net_item.set_text(net_text);
+}
+
+/// macOS：两个图标共用同一套菜单项（各自建一份，NSMenu 只能挂在一个状态栏项上）。
+#[cfg(target_os = "macos")]
 fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let show_item = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let checkin_item = MenuItem::with_id(app, "checkin", "立即签到全部账号", true, None::<&str>)?;
@@ -1089,6 +1179,44 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let separator = PredefinedMenuItem::separator(app)?;
 
     Menu::with_items(app, &[&show_item, &checkin_item, &separator, &quit_item])
+}
+
+/// Windows：右键菜单顶部先列当前指标（只读、禁用态），再接操作项。
+///
+/// 这是 Windows 托盘程序的常规做法：系统不在图标旁边显示文字，
+/// 所以「当前 CPU/内存/网速」只能摆在菜单里，且不必点进主窗口。
+#[cfg(not(target_os = "macos"))]
+fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let info_item = MenuItem::with_id(
+        app,
+        "metrics-info",
+        "硬盘 / CPU / 内存：采样中…",
+        false,
+        None::<&str>,
+    )?;
+    let net_item = MenuItem::with_id(app, "metrics-net", "网速：采样中…", false, None::<&str>)?;
+    let show_item = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+    let checkin_item = MenuItem::with_id(app, "checkin", "立即签到全部账号", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出 WB 签到", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let separator2 = PredefinedMenuItem::separator(app)?;
+
+    if let Ok(mut guard) = TRAY_METRICS.lock() {
+        *guard = Some((info_item.clone(), net_item.clone()));
+    }
+
+    Menu::with_items(
+        app,
+        &[
+            &info_item,
+            &net_item,
+            &separator,
+            &show_item,
+            &checkin_item,
+            &separator2,
+            &quit_item,
+        ],
+    )
 }
 
 fn tray_menu_event(app: &AppHandle, event: MenuEvent) {

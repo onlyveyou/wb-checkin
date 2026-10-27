@@ -320,6 +320,16 @@ pub struct AppConfig {
     /// 这类体验任务只是走个流程，用付费模型纯属浪费额度。
     #[serde(default = "default_free_model")]
     pub free_model: String,
+    /// 官方客户端登录态文件路径。留空 = 自动探测（macOS 查
+    /// `~/Library/Application Support`，Windows 查 `%APPDATA%` 并扫描一级目录）。
+    ///
+    /// 之所以可手填：客户端换发行版或改名后数据目录名无从预知，
+    /// 猜错会写坏文件，不如留一个人工出口。
+    #[serde(default)]
+    pub client_auth_file: String,
+    /// 客户端程序路径（Windows 上是 exe，macOS 上是 .app）。留空 = 自动探测。
+    #[serde(default)]
+    pub client_app_path: String,
 }
 
 impl AppConfig {
@@ -334,6 +344,8 @@ impl AppConfig {
             // 走 sysmon 的白名单，顺手剔掉手改配置写进来的乱七八糟标识。
             menubar_items: crate::sysmon::normalize(&self.menubar_items),
             free_model: self.free_model.trim().to_string(),
+            client_auth_file: self.client_auth_file.trim().to_string(),
+            client_app_path: self.client_app_path.trim().to_string(),
         }
     }
 }
@@ -348,6 +360,8 @@ impl Default for AppConfig {
             local_ai: LocalAiConfig::default(),
             menubar_items: default_menubar_items(),
             free_model: default_free_model(),
+            client_auth_file: String::new(),
+            client_app_path: String::new(),
         }
     }
 }

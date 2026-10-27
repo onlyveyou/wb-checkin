@@ -37,6 +37,9 @@ export const setConfig = (
   backupMinute: number,
   autoGrowth?: boolean,
   freeModel?: string,
+  // 客户端路径：留空字符串 = 恢复自动探测。不传则保持原值不动。
+  clientAuthFile?: string,
+  clientAppPath?: string,
 ) =>
   invoke<AppConfig>("set_config", {
     autoEnabled,
@@ -44,6 +47,8 @@ export const setConfig = (
     backupMinute,
     autoGrowth,
     freeModel,
+    clientAuthFile,
+    clientAppPath,
   });
 
 export const getLogs = (limit = 80) => invoke<LogRecord[]>("get_logs", { limit });
@@ -209,13 +214,17 @@ export const ferryLogs = (lines = 120) => invoke<FerryLogTail>("ferry_logs", { l
 // 授权归用户在系统设置里给，这里的命令只回报状态、触发一次授权提示、dump 界面树。
 
 /** 辅助功能的状态：`windows > 0` 才是真读得到界面，`trusted` 只表示系统设置里勾没勾。 */
-export type AxStatus = { trusted: boolean; clientPid: number | null; windows: number };
+export type AxStatus = {
+  trusted: boolean;
+  clientPid: number | null;
+  windows: number;
+  /** 平台标识：Windows 没有「辅助功能」授权这一步，界面据此隐藏授权入口。 */
+  platform?: string;
+};
 
-export const axStatus = () =>
-  invoke<{ trusted: boolean; clientPid: number | null; windows: number }>("ax_status");
+export const axStatus = () => invoke<AxStatus>("ax_status");
 
 export const axProbe = () =>
   invoke<{ path: string; lines: number; windows: number; head: string }>("ax_probe");
 
-export const axRequestTrust = () =>
-  invoke<{ trusted: boolean; clientPid: number | null; windows: number }>("ax_request_trust");
+export const axRequestTrust = () => invoke<AxStatus>("ax_request_trust");

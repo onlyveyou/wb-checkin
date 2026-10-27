@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tauri::AppHandle;
 
-use crate::{NET_TRAY_ID, TRAY_ID};
+use crate::TRAY_ID;
+/// 网速那个独立状态栏项只存在于 macOS；Windows 把网速塞进气泡提示与右键菜单。
+#[cfg(target_os = "macos")]
+use crate::NET_TRAY_ID;
 
 // ---------------------------------------------------------------------------
 // 指标标识
@@ -366,14 +369,72 @@ pub fn info_title(sample: &Sample) -> String {
 }
 
 /// 认领状态栏按钮用的一次性标记。必须足够独特，且不会出现在真实文字里。
+#[cfg(target_os = "macos")]
 const MARK_NET: &str = "wb#net";
+#[cfg(target_os = "macos")]
 const MARK_INFO: &str = "wb#info";
 
-/// 给某个托盘刷文字。
+/// 把一行指标文字压成单行（供 Windows 气泡提示使用）。
+fn flatten(text: &str) -> String {
+    text.replace('\n', "  ")
+}
+
+/// 把采样结果刷到托盘上。
+///
+/// 两个平台呈现方式不同：
+/// - macOS：菜单栏能放文字，主图标放硬盘/CPU/内存，网速单独一个状态栏项（两行）；
+/// - Windows：系统托盘只有 16×16 图标，没有文字区。按 Windows 惯例改成
+///   「悬停气泡 + 右键菜单」：气泡里两行并排，菜单里两行只读项，每秒跟着变。
+fn paint_all(app: &AppHandle, info: &str, net: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        // 网速图标只是显示用，没内容就整个藏起来，不占菜单栏位置。
+        if let Some(tray) = app.tray_by_id(NET_TRAY_ID) {
+            if net.is_empty() {
+                let _ = tray.set_visible(false);
+            } else {
+                // 勾回来时状态栏项是新建的，按钮也得重新认领一次。
+                let _ = tray.set_visible(true);
+                paint(app, NET_TRAY_ID, MARK_NET, net);
+            }
+        }
+        // 主图标始终留着，它是这个后台进程唯一的入口。
+        paint(app, TRAY_ID, MARK_INFO, info);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri::Manager;
+
+        let mut tooltip = String::new();
+        if !info.is_empty() {
+            tooltip.push_str(info);
+        }
+        if !net.is_empty() {
+            if !tooltip.is_empty() {
+                tooltip.push('\n');
+            }
+            tooltip.push_str(&flatten(net));
+        }
+
+        if let Some(tray) = app.tray_by_id(TRAY_ID) {
+            let text = if tooltip.is_empty() {
+                "WB 签到 · 后台运行中".to_string()
+            } else {
+                format!("WB 签到\n{tooltip}")
+            };
+            let _ = tray.set_tooltip(Some(text.as_str()));
+        }
+        crate::tray_metrics_update(info, net);
+    }
+}
+
+/// macOS：给某个托盘刷文字（富文本两行）。
 ///
 /// 富文本标题没法按 id 直接寻址到按钮，所以先给托盘打一个独特的纯文本标记，
 /// `menubar` 按这个标记认领按钮后立刻换成 9pt 富文本 —— 两步在同一轮事件循环里
 /// 完成，标记不会被真的画出来。认领失败就退回单行纯文本，至少不会留空白。
+#[cfg(target_os = "macos")]
 fn paint(app: &AppHandle, tray_id: &str, mark: &str, text: &str) {
     let Some(tray) = app.tray_by_id(tray_id) else {
         return;
@@ -388,7 +449,7 @@ fn paint(app: &AppHandle, tray_id: &str, mark: &str, text: &str) {
         return;
     }
 
-    let flat = text.replace('\n', " ");
+    let flat = flatten(text);
     let _ = tray.set_title(Some(flat.as_str()));
 }
 
@@ -454,23 +515,11 @@ pub fn spawn(app: AppHandle) {
             let info = info_title(&sample);
             // 文字没变就不碰托盘，省掉一次不必要的界面重绘。
             if net != last_net || info != last_info {
-                // AppKit 只能在主线程动，采样线程算完把文字丢过去。
+                // 界面对象只能在主线程动，采样线程算完把文字丢过去。
                 let handle = app.clone();
                 let (net_next, info_next) = (net.clone(), info.clone());
                 let _ = app.run_on_main_thread(move || {
-                    // 网速图标只是显示用，没内容就整个藏起来，不占菜单栏位置。
-                    if let Some(tray) = handle.tray_by_id(NET_TRAY_ID) {
-                        if net_next.is_empty() {
-                            let _ = tray.set_visible(false);
-                        } else {
-                            // 勾回来时状态栏项是新建的，按钮也得重新认领一次。
-                            let _ = tray.set_visible(true);
-                            paint(&handle, NET_TRAY_ID, MARK_NET, &net_next);
-                        }
-                    }
-
-                    // 主图标始终留着，它是这个后台进程唯一的入口。
-                    paint(&handle, TRAY_ID, MARK_INFO, &info_next);
+                    paint_all(&handle, &info_next, &net_next);
                 });
                 last_net = net;
                 last_info = info;
@@ -547,12 +596,13 @@ pub fn net_totals() -> Option<(u64, u64)> {
 
 #[cfg(target_os = "windows")]
 fn cpu_ticks() -> Option<[u32; 4]> {
+    use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::GetSystemTimes;
 
-    let mut idle = std::mem::zeroed();
-    let mut kernel = std::mem::zeroed();
-    let mut user = std::mem::zeroed();
-    // SAFETY: 三个出参都是 FILETIME 栈变量。
+    // SAFETY: FILETIME 是纯 POD，全零是合法初值。
+    let (mut idle, mut kernel, mut user): (FILETIME, FILETIME, FILETIME) =
+        unsafe { (std::mem::zeroed(), std::mem::zeroed(), std::mem::zeroed()) };
+    // SAFETY: 三个出参都是栈上的 FILETIME。
     if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
         return None;
     }

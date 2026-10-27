@@ -12,6 +12,7 @@ import type {
   LogRecord,
   PendingAccount,
   StorePaths,
+  SwitchPreflight,
   SysMetrics,
   UsageSummary,
 } from "./types";
@@ -80,6 +81,8 @@ const INITIAL_CONFIG: AppConfig = {
   local_ai: { enabled: false, log_dir: "", smctemp_path: "", services: [] },
   menubar_items: ["net", "disk"],
   free_model: "hy3",
+  client_auth_file: "",
+  client_app_path: "",
 };
 
 /** 菜单栏可勾选的指标。顺序与后端 `sysmon::ITEMS` 一致。 */
@@ -96,6 +99,10 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("checkin");
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [config, setConfigState] = useState<AppConfig>(INITIAL_CONFIG);
+  /** 后端当前认定的客户端路径（自动探测结果，只读展示）。 */
+  const [clientPaths, setClientPaths] = useState<SwitchPreflight | null>(null);
+  /** 手填草稿：不直接写 config，避免每敲一个字就存一次盘。 */
+  const [clientPathDraft, setClientPathDraft] = useState({ authFile: "", app: "" });
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [paths, setPaths] = useState<StorePaths | null>(null);
   const [running, setRunning] = useState(false);
@@ -143,6 +150,8 @@ export default function App() {
    */
   const [ax, setAx] = useState<AxStatus | null>(null);
   const [axProbing, setAxProbing] = useState(false);
+  /** Windows 没有「辅助功能」授权这一步，界面文案与按钮要跟着变。 */
+  const isWindows = ax?.platform === "windows";
   /** 授权期间的轮询句柄。用户勾完系统设置那一刻我们要知道。 */
   const axPollRef = useRef<number | null>(null);
 
@@ -159,6 +168,12 @@ export default function App() {
     ]);
     setAccounts(list);
     setConfigState(cfg);
+    // 手填框跟着配置走：首次加载用它填，之后不再覆盖用户正在输入的内容。
+    setClientPathDraft((draft) =>
+      draft.authFile === "" && draft.app === ""
+        ? { authFile: cfg.client_auth_file, app: cfg.client_app_path }
+        : draft,
+    );
     setLogs(records);
     setPaths(storePaths);
     setIdentity(who);
@@ -501,6 +516,41 @@ export default function App() {
       setBanner({ kind: "danger", text: String(error) });
     }
   };
+
+  /** 重新问一次后端：它现在认定的登录态文件与客户端位置在哪。 */
+  const refreshClientPaths = useCallback(async () => {
+    try {
+      setClientPaths(await api.switchPreflight());
+    } catch {
+      // 客户端没装、目录不存在都会走到这里，界面显示「未找到」即可
+      setClientPaths(null);
+    }
+  }, []);
+
+  /** 保存手填的客户端路径。两个都留空 = 恢复自动探测。 */
+  const saveClientPaths = async () => {
+    try {
+      const saved = await api.setConfig(
+        config.auto_enabled,
+        config.backup_hour,
+        config.backup_minute,
+        config.auto_growth,
+        config.free_model,
+        clientPathDraft.authFile.trim(),
+        clientPathDraft.app.trim(),
+      );
+      setConfigState(saved);
+      await refreshClientPaths();
+      setBanner({ kind: "ok", text: "客户端路径已保存" });
+    } catch (error) {
+      setBanner({ kind: "danger", text: String(error) });
+    }
+  };
+
+  // 首屏问一次自动探测结果；重新打开设置页时也会用到最新的值。
+  useEffect(() => {
+    refreshClientPaths().catch(() => undefined);
+  }, [refreshClientPaths]);
 
   /** 重新读一次辅助功能授权状态。授权之后不会自动生效，得用户点一下刷新。 */
   const refreshAx = async () => {
@@ -948,16 +998,20 @@ export default function App() {
               <div className="row-label">界面自动化</div>
               <div className="row-hint">
                 「召唤专家」这类体验任务只有在客户端界面里真的说上一句才算数，接口代不了。
-                授权「辅助功能」之后，程序可以替你打开专家页并发送一句话。
+                {isWindows
+                  ? "Windows 上直接用系统自带的 UI Automation，不需要额外授权，只要客户端开着窗口就能用。"
+                  : "授权「辅助功能」之后，程序可以替你打开专家页并发送一句话。"}
                 <br />
                 当前：
                 {ax === null
                   ? "检查中"
                   : ax.windows > 0
                     ? "可用"
-                    : ax.trusted
-                      ? "已勾选但读不到界面，重启客户端再试"
-                      : "未授权"}
+                    : isWindows
+                      ? "没读到客户端窗口，可能还缩在托盘里，点开它再试"
+                      : ax.trusted
+                        ? "已勾选但读不到界面，重启客户端再试"
+                        : "未授权"}
                 {ax?.clientPid ? `　客户端 ${ax.clientPid} 正在运行` : "　客户端未运行"}
               </div>
             </div>
@@ -965,7 +1019,7 @@ export default function App() {
               <button className="btn sm" onClick={probeAx} disabled={axProbing}>
                 {axProbing ? "探测中" : "探测界面"}
               </button>
-              {ax && ax.windows > 0 ? (
+              {isWindows || (ax && ax.windows > 0) ? (
                 <button className="btn sm ghost" onClick={refreshAx}>
                   刷新
                 </button>
@@ -998,11 +1052,46 @@ export default function App() {
           </div>
           <div className="row">
             <div>
+              <div className="row-label">客户端路径</div>
+              <div className="row-hint">
+                切换账号要改写官方客户端的登录态文件，重启时还要拉起客户端本身。
+                留空由程序自动探测；Windows 上客户端的数据目录名无从预知，
+                探测不到时在这里手填（两个都留空即恢复自动探测）。
+              </div>
+              <div className="path">登录态：{clientPaths?.authFilePath ?? "未找到"}</div>
+              <div className="path">客户端：{clientPaths?.clientAppPath ?? "未找到"}</div>
+              <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+                <input
+                  className="select"
+                  placeholder="登录态文件路径（留空 = 自动探测）"
+                  value={clientPathDraft.authFile}
+                  onChange={(event) =>
+                    setClientPathDraft((draft) => ({ ...draft, authFile: event.target.value }))
+                  }
+                />
+                <input
+                  className="select"
+                  placeholder="客户端程序路径（留空 = 自动探测）"
+                  value={clientPathDraft.app}
+                  onChange={(event) =>
+                    setClientPathDraft((draft) => ({ ...draft, app: event.target.value }))
+                  }
+                />
+              </div>
+            </div>
+            <div className="row-actions">
+              <button className="btn sm" onClick={saveClientPaths}>
+                保存
+              </button>
+            </div>
+          </div>
+          <div className="row">
+            <div>
               <div className="row-label">后台常驻</div>
               <div className="row-hint">
-                点窗口的关闭按钮不会退出程序，窗口会收起来、程序继续在右上角菜单栏跑，
-                到点照常签到。要把界面调回来，点菜单栏图标 →「显示主窗口」；要真正退出，
-                点「退出 WB 签到」或按 ⌘Q。
+                点窗口的关闭按钮不会退出程序，窗口会收起来、程序继续在菜单栏 / 托盘里跑，
+                到点照常签到。要把界面调回来，点托盘图标 →「显示主窗口」；要真正退出，
+                点托盘菜单或右键菜单里的「退出 WB 签到」。
               </div>
             </div>
           </div>

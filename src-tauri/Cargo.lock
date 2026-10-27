@@ -4172,6 +4172,7 @@ dependencies = [
  "tauri-build",
  "tokio",
  "uuid",
+ "windows",
  "windows-sys 0.59.0",
 ]
 

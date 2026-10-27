@@ -19,6 +19,7 @@
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 use crate::paths::{data_dir, now_ms};
@@ -39,9 +40,36 @@ const SESSION_EXCLUDES: &[&str] = &[
     "Crashpad",
 ];
 
-/// 客户端重建这些目录即可，不需要从快照里恢复（恢复前也一律清掉）。
+/// 客户端的数据根。
+///
+/// macOS 固定在 `~/.workbuddy`。Windows 上客户端可能沿用同名目录，也可能按
+/// Electron 惯例放到 `%APPDATA%\<应用名>`，两者都没法先验确定，所以按
+/// 「主目录下的 .workbuddy → %APPDATA% 下的同名目录」顺序取第一个存在的；
+/// 都不存在时返回第一个候选（存档时会因为目录缺失如实返回失败，不会写坏别处）。
 fn wb_root() -> PathBuf {
-    crate::paths::home_dir().join(".workbuddy")
+    #[allow(unused_mut)]
+    let mut candidates = vec![crate::paths::home_dir().join(".workbuddy")];
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            if !appdata.trim().is_empty() {
+                let root = PathBuf::from(appdata);
+                candidates.push(root.join("WorkBuddy"));
+                candidates.push(root.join("workbuddy"));
+            }
+        }
+    }
+
+    let fallback = candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| crate::paths::home_dir().join(".workbuddy"));
+    candidates
+        .iter()
+        .find(|path| path.exists())
+        .cloned()
+        .unwrap_or(fallback)
 }
 
 pub fn session_dir() -> PathBuf {
@@ -86,6 +114,7 @@ fn snapshot_dir(uid: &str) -> PathBuf {
     profiles_root().join(safe_name(uid))
 }
 
+#[cfg(target_os = "macos")]
 fn run(program: &str, args: &[String]) -> bool {
     Command::new(program)
         .args(args)
@@ -103,6 +132,7 @@ fn remove_path(path: &Path) {
 }
 
 /// 复制一个目录/文件。优先 APFS clonefile，失败退回普通递归复制。
+#[cfg(target_os = "macos")]
 fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
     if !from.exists() {
         return Ok(());
@@ -123,6 +153,39 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
         return Ok(());
     }
     Err(format!("复制失败：{}", from.to_string_lossy()))
+}
+
+/// Windows / 其它平台：没有 `cp`，用 std 递归复制。
+///
+/// 这里不追求写时复制——Windows 的块克隆需要 ReFS 与特定 API，
+/// 快照体积大一点是小事，正确性优先。
+#[cfg(not(target_os = "macos"))]
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    if !from.exists() {
+        return Ok(());
+    }
+    if to.exists() {
+        remove_path(to);
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("创建目录失败：{error}"))?;
+    }
+
+    copy_entry(from, to).map_err(|error| format!("复制失败（{}）：{error}", from.to_string_lossy()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_entry(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_entry(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
+    }
 }
 
 fn is_excluded(name: &str) -> bool {
@@ -166,6 +229,7 @@ fn restore_session(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn dir_size_kb(path: &Path) -> u64 {
     let output = Command::new("du")
         .args(["-sk", &path.to_string_lossy()])
@@ -178,6 +242,28 @@ fn dir_size_kb(path: &Path) -> u64 {
             .unwrap_or(0),
         _ => 0,
     }
+}
+
+/// Windows 没有 `du`，自己走一遍目录累加（快照目录动辄几百 MB，
+/// 但这是一次 O(n) 的 metadata 遍历，几秒内能完成）。
+#[cfg(not(target_os = "macos"))]
+fn dir_size_kb(path: &Path) -> u64 {
+    fn walk(path: &Path, total: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child.is_dir() {
+                walk(&child, total);
+            } else if let Ok(meta) = child.metadata() {
+                *total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    let mut bytes = 0u64;
+    walk(path, &mut bytes);
+    bytes / 1024
 }
 
 /// 账号级用户目录（L2）的两个后缀：普通与 personal。
