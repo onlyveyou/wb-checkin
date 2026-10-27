@@ -1,6 +1,6 @@
 [package]
 name = "wb-checkin"
-version = "0.10.0"
+version = "0.10.1"
 description = "WB 签到 —— WorkBuddy / CodeBuddy 多账号每日自动签到"
 authors = ["you"]
 edition = "2021"

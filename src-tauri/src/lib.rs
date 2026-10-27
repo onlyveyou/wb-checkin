@@ -656,25 +656,57 @@ async fn growth_pending() -> Value {
 
 /// 交给系统默认程序打开一个链接或文件。
 ///
-/// macOS 用 `open`；Windows 用 `cmd /C start` —— 后者会把第一个带引号的参数当成
-/// 窗口标题，所以补一个空标题占位。两处调用（deeplink、OAuth 登录页）都走这里，
-/// 免得平台差异散落成两份。
+/// macOS 用 `open`；Windows **必须**走 `ShellExecuteW`，不能用 `cmd /C start`：
+/// cmd 把未加引号的 `&` 当命令分隔符，而登录地址恰恰是
+/// `https://…/login?platform=workbuddy&state=<uuid>` —— 交给 cmd 会在 `&` 处截断，
+/// 浏览器只拿到不带 state 的地址（表现为「登录链接不一样、点完登录永远等不到结果」）。
+/// `Command::args` 只在参数含空格/制表符/引号时才加引号，`&` 不在其列，所以这条路修不了。
 pub(crate) fn open_external(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    let spawned = std::process::Command::new("open").arg(url).spawn();
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
 
     #[cfg(target_os = "windows")]
-    let spawned = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn();
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let wide = |text: &str| -> Vec<u16> {
+            text.encode_utf16().chain(std::iter::once(0)).collect()
+        };
+        let operation = wide("open");
+        let target = wide(url);
+        // SAFETY: 两个字符串都以 NUL 结尾且在调用期间存活；目录与参数允许为 NULL。
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecuteW 的返回值 >32 才算成功，其余是错误码。
+        if result as isize <= 32 {
+            return Err(format!(
+                "打开链接失败（ShellExecuteW 返回 {}）",
+                result as isize
+            ));
+        }
+        Ok(())
+    }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let spawned: std::io::Result<std::process::Child> = Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "当前平台不支持打开外部链接",
-    ));
-
-    spawned.map(|_| ()).map_err(|error| error.to_string())
+    {
+        let _ = url;
+        Err("当前平台不支持打开外部链接".to_string())
+    }
 }
 
 /// 打开一个链接（客户端 deeplink 或站内地址）。只放行这两种，避免变成任意命令入口。
