@@ -41,7 +41,7 @@ const SESSION_EXCLUDES: &[&str] = &[
 
 /// 客户端重建这些目录即可，不需要从快照里恢复（恢复前也一律清掉）。
 fn wb_root() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".workbuddy")
+    crate::paths::home_dir().join(".workbuddy")
 }
 
 pub fn session_dir() -> PathBuf {

@@ -247,6 +247,7 @@ fn read_temps(configured: &str) -> Value {
 /// 长度往这块内存里写数的，字段漏一个或类型写错就会读出垃圾。前 4 个计数是 32 位，
 /// 其后转为 64 位；`#[repr(C)]` 的对齐规则与 C 编译器一致，顺序不错就不会错位。
 /// 布局由 `vm_statistics64_layout_matches_kernel_header` 这个单测钉死。
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Default)]
 struct VmStatistics64 {
@@ -276,16 +277,21 @@ struct VmStatistics64 {
     total_uncompressed_pages_in_compressor: u64,
 }
 
+#[cfg(target_os = "macos")]
 const HOST_VM_INFO64: i32 = 4;
 /// 内核以「整数个数」为单位要缓冲区长度。由结构体自身大小推出，改了布局会自动跟着变。
+#[cfg(target_os = "macos")]
 const HOST_VM_INFO64_COUNT: u32 = (std::mem::size_of::<VmStatistics64>() / 4) as u32;
+#[cfg(target_os = "macos")]
 const KERN_SUCCESS: i32 = 0;
 
+#[cfg(target_os = "macos")]
 extern "C" {
     fn mach_host_self() -> u32;
     fn host_statistics64(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
 }
 
+#[cfg(target_os = "macos")]
 /// 已安装内存的字节数（`hw.memsize`）。读不到返回 None。
 fn physical_memory() -> Option<u64> {
     let mut value: u64 = 0;
@@ -304,6 +310,7 @@ fn physical_memory() -> Option<u64> {
     (status == 0 && size == std::mem::size_of::<u64>()).then_some(value)
 }
 
+#[cfg(target_os = "macos")]
 /// 系统页大小。Apple Silicon 上是 16 KiB、Intel 机器上是 4 KiB，不能写死。
 fn page_size() -> u64 {
     // SAFETY: sysconf 只读系统常量，`_SC_PAGESIZE` 是合法参数。
@@ -321,6 +328,7 @@ fn page_size() -> u64 {
 ///
 /// 直接调 mach 口读，不起 `vm_stat` 之类的子进程 —— 面板每 5 秒刷一次，
 /// 每轮 fork 一个进程不值当。
+#[cfg(target_os = "macos")]
 pub(crate) fn read_memory() -> Value {
     let mut stats = VmStatistics64::default();
     let mut count = HOST_VM_INFO64_COUNT;
@@ -351,6 +359,28 @@ pub(crate) fn read_memory() -> Value {
         "used": used,
         // 一位小数：面板上「38.7%」比整数更能反映缓存占用的小幅波动
         "usedPercent": ((used as f64 / total as f64) * 1000.0).round() / 10.0,
+    })
+}
+
+/// Windows 内存占用：`GlobalMemoryStatusEx` 直接给出总内存与可用内存。
+///
+/// 口径与 mac 版一致：已用 = 总量 − 可用量；`usedPercent` 保留一位小数。
+#[cfg(target_os = "windows")]
+pub(crate) fn read_memory() -> Value {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    // 必须先把 dwLength 填成结构体大小，否则 API 直接返回失败。
+    status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return no_memory();
+    }
+    let total = status.ullTotalPhys;
+    let used = total.saturating_sub(status.ullAvailPhys);
+    json!({
+        "total": total,
+        "used": used,
+        "usedPercent": ((used as f64 / total.max(1) as f64) * 1000.0).round() / 10.0,
     })
 }
 

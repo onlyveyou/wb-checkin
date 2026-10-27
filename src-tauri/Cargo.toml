@@ -20,13 +20,25 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
-# 读内存用量：调 mach 的 host_statistics64 / sysctlbyname，避免为一次采样起子进程
-libc = "0.2"
-
 # 菜单栏两行标题要绕过 Tauri 的 set_title 直接设 NSAttributedString，
 # 只用到 objc2 的 msg_send，不引入整套 objc2-app-kit（它已在依赖树里）。
+# libc 同样只在 macOS 用：内存/磁盘/网卡读数调 mach 的 host_statistics64、
+# statvfs、getifaddrs；Windows 侧走下面的 windows-sys。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+libc = "0.2"
+
+# Windows 系统指标：GetSystemTimes / GlobalMemoryStatusEx / GetDiskFreeSpaceExW /
+# GetIfTable2。只开需要的 feature，避免把整个 Win32 面都编进来。
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+] }
 
 [profile.release]
 codegen-units = 8

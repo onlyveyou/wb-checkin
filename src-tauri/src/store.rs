@@ -269,9 +269,23 @@ pub fn add_manual(
 // ---------------------------------------------------------------------------
 
 fn auth_file_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join("Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info")
+    #[cfg(target_os = "macos")]
+    {
+        return crate::paths::home_dir()
+            .join("Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info");
+    }
+    // Windows 客户端的登录态目录按 Electron 的 %APPDATA% 布局探测；实测确认后可收窄。
+    #[cfg(not(target_os = "macos"))]
+    {
+        let root = std::env::var("APPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| crate::paths::home_dir());
+        root.join("CodeBuddyExtension")
+            .join("Data")
+            .join("Public")
+            .join("auth")
+            .join("workbuddy-desktop.info")
+    }
 }
 
 /// 把官方认证文件里的一条记录转成账号记录。

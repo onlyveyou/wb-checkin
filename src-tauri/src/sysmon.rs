@@ -79,6 +79,7 @@ fn selected_from(items: &[String]) -> Vec<&'static str> {
 ///
 /// APFS 的多个卷共享容器空间，`statvfs` 给出的可用量是整个容器口径，所以这里
 /// 的百分比是「本机磁盘用了多少」，不是单个卷的配额占用。
+#[cfg(target_os = "macos")]
 pub fn disk() -> Option<(u64, u64)> {
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
     // SAFETY: 路径是以 NUL 结尾的静态字节串；`stat` 是栈上变量，由内核按
@@ -121,6 +122,7 @@ const AF_LINK: u8 = 18;
 ///
 /// 计数器是 32 位的，超过 4 GB 会回绕；调用方用差值时必须用 `wrapping_sub`。
 /// `lo0` 排除在外，否则本机回环流量会让网速看起来虚高。
+#[cfg(target_os = "macos")]
 pub fn net_totals() -> Option<(u64, u64)> {
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: 按 libc 约定传入链表头指针，成功后由 `freeifaddrs` 释放。
@@ -186,11 +188,13 @@ struct HostCpuLoadInfo {
 const HOST_CPU_LOAD_INFO: i32 = 3;
 const HOST_CPU_LOAD_INFO_COUNT: u32 = 4;
 
+#[cfg(target_os = "macos")]
 extern "C" {
     fn mach_host_self() -> u32;
     fn host_statistics(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
 }
 
+#[cfg(target_os = "macos")]
 fn cpu_ticks() -> Option<[u32; 4]> {
     let mut info = HostCpuLoadInfo::default();
     let mut count = HOST_CPU_LOAD_INFO_COUNT;
@@ -478,6 +482,88 @@ pub fn spawn(app: AppHandle) {
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Windows 实现
+//
+// 与 macOS 逐项对应：GetDiskFreeSpaceExW / GetIfTable2 / GetSystemTimes。
+// 计数器口径保持一致（net 返回累计字节、cpu_ticks 第 3 位是 idle），
+// 上层 `snapshot` 与托盘绘制不用区分平台。
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+pub fn disk() -> Option<(u64, u64)> {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    // 系统盘用 %SystemDrive%（默认 C:），拼成宽字符路径交给 W 版接口。
+    let root = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+    let path = format!("{root}\\");
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let mut free_to_caller: u64 = 0;
+    let mut total: u64 = 0;
+    let mut total_free: u64 = 0;
+    // SAFETY: wide 以 NUL 结尾；三个出参都是栈上 u64。
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(wide.as_ptr(), &mut free_to_caller, &mut total, &mut total_free)
+    };
+    if ok == 0 || total == 0 {
+        return None;
+    }
+    Some((total, total.saturating_sub(total_free)))
+}
+
+#[cfg(target_os = "windows")]
+pub fn net_totals() -> Option<(u64, u64)> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        FreeMibTable, GetIfTable2, MIB_IF_TABLE2,
+    };
+
+    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+    // SAFETY: 成功后 table 由系统分配，必须用 FreeMibTable 释放。
+    if unsafe { GetIfTable2(&mut table) } != 0 || table.is_null() {
+        return None;
+    }
+
+    let mut rx = 0u64;
+    let mut tx = 0u64;
+    // SAFETY: NumEntries 与紧随其后的 Table 数组由 API 保证一致。
+    unsafe {
+        let entries = (*table).NumEntries as usize;
+        let rows = std::slice::from_raw_parts((*table).Table.as_ptr(), entries);
+        for row in rows {
+            // 本机回环不算（对应 mac 侧排除 lo0），否则网速会虚高。
+            const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
+            if row.Type == IF_TYPE_SOFTWARE_LOOPBACK {
+                continue;
+            }
+            rx = rx.saturating_add(row.InOctets);
+            tx = tx.saturating_add(row.OutOctets);
+        }
+        FreeMibTable(table as *const _);
+    }
+    Some((rx, tx))
+}
+
+#[cfg(target_os = "windows")]
+fn cpu_ticks() -> Option<[u32; 4]> {
+    use windows_sys::Win32::System::Threading::GetSystemTimes;
+
+    let mut idle = std::mem::zeroed();
+    let mut kernel = std::mem::zeroed();
+    let mut user = std::mem::zeroed();
+    // SAFETY: 三个出参都是 FILETIME 栈变量。
+    if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
+        return None;
+    }
+    // FILETIME 是 64 位 100ns 计数。上层用 wrapping_sub 求差值，取低 32 位即可。
+    let idle_ticks = idle.dwLowDateTime;
+    let kernel_ticks = kernel.dwLowDateTime;
+    let user_ticks = user.dwLowDateTime;
+    // Windows 的 kernel 时间已包含 idle，必须减掉，否则 idle 被重复计入。
+    let system = kernel_ticks.wrapping_sub(idle_ticks);
+    Some([user_ticks, system, idle_ticks, 0])
+}
 
 #[cfg(test)]
 mod tests {

@@ -15,6 +15,7 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -89,11 +90,25 @@ fn discover_node() -> Result<PathBuf, String> {
     candidates.push(PathBuf::from("/opt/homebrew/bin/node"));
     candidates.push(PathBuf::from("/usr/local/bin/node"));
     candidates.push(PathBuf::from("/usr/bin/node"));
+    #[cfg(unix)]
     if let Ok(output) = Command::new("/bin/sh")
         .args(["-lc", "command -v node"])
         .output()
     {
         let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !found.is_empty() {
+            candidates.push(PathBuf::from(found));
+        }
+    }
+    // Windows 用 `where node` 查 PATH，输出可能多行，取第一条。
+    #[cfg(windows)]
+    if let Ok(output) = Command::new("where").arg("node").output() {
+        let found = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if !found.is_empty() {
             candidates.push(PathBuf::from(found));
         }
@@ -137,6 +152,7 @@ fn discover_node() -> Result<PathBuf, String> {
 fn ensure_dir() -> Result<(), String> {
     let dir = data_dir();
     fs::create_dir_all(&dir).map_err(|error| format!("创建目录失败：{error}"))?;
+    #[cfg(unix)]
     let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
     Ok(())
 }
@@ -197,6 +213,7 @@ fn child_running() -> bool {
 ///
 /// 判据只认一条：监听者 PID 与本目录 `service.pid` 记录一致。该文件在 0700 目录下、
 /// 由 sidecar 自己以 0600 写入，别的程序写不进来 —— 所以它比"命令行里含 sidecar"更可靠。
+#[cfg(target_os = "macos")]
 fn orphan_pid() -> Option<i32> {
     let recorded: i32 = fs::read_to_string(data_dir().join("service.pid"))
         .ok()?
@@ -216,15 +233,54 @@ fn orphan_pid() -> Option<i32> {
     (listener == recorded).then_some(listener)
 }
 
+/// Windows：用 `netstat -ano` 找监听该端口的 PID，与本目录 `service.pid` 对照。
+#[cfg(target_os = "windows")]
+fn orphan_pid() -> Option<i32> {
+    let recorded: i32 = fs::read_to_string(data_dir().join("service.pid"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let output = Command::new("netstat").args(["-ano"]).output().ok()?;
+    let needle = format!(":{PORT}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        if line.contains("LISTENING") && line.contains(&needle) {
+            if let Some(pid) = line
+                .split_whitespace()
+                .last()
+                .and_then(|value| value.parse::<i32>().ok())
+            {
+                return (pid == recorded).then_some(pid);
+            }
+        }
+    }
+    None
+}
+
 /// 端口是不是正被我们自己的 sidecar 服务着（含被过继的那种）。
 fn own_sidecar_serving() -> bool {
     // 先做一次零成本判断：没人监听就绝不去 spawn lsof。
     std::net::TcpStream::connect(("127.0.0.1", PORT)).is_ok() && orphan_pid().is_some()
 }
 
-/// 让一个没有句柄的 sidecar 走正常退出路径（它收到 SIGTERM 会先摘掉 models.json 里的条目）。
-fn terminate_orphan(pid: i32) {
+/// 结束一个进程。unix 走 SIGTERM（sidecar 收到后先摘掉 models.json 里的条目再退出），
+/// Windows 没有等价信号，用 taskkill。
+#[cfg(unix)]
+fn terminate_pid(pid: i32) {
     unsafe { libc::kill(pid, libc::SIGTERM) };
+}
+
+#[cfg(windows)]
+fn terminate_pid(pid: i32) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .output();
+}
+
+/// 让一个没有句柄的 sidecar 走正常退出路径。
+fn terminate_orphan(pid: i32) {
+    terminate_pid(pid);
 }
 
 fn wait_port_free(limit: Duration) -> bool {
@@ -454,7 +510,7 @@ pub async fn stop() -> Result<Value, String> {
         }));
     };
     // sidecar 收到 SIGTERM 会把自己导入 models.json 的条目摘掉再退出。
-    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    terminate_pid(child.id() as i32);
     for _ in 0..50 {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -479,7 +535,7 @@ pub fn stop_blocking() {
         }
         return;
     };
-    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    terminate_pid(child.id() as i32);
     for _ in 0..40 {
         match child.try_wait() {
             Ok(Some(_)) => break,

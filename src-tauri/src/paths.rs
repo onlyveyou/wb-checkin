@@ -8,10 +8,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+/// 用户主目录。Windows 没有 `HOME`，退回 `USERPROFILE`；两者都缺时用当前目录。
 pub fn home_dir() -> PathBuf {
+    #[cfg(windows)]
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        if !profile.trim().is_empty() {
+            return PathBuf::from(profile);
+        }
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
 }
@@ -50,7 +58,10 @@ pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     if !dir.exists() {
         fs::create_dir_all(dir)?;
     }
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+    // Windows 的权限是 ACL，没有 0700 这种模式位，目录直接继承用户配置目录的 ACL。
+    #[cfg(unix)]
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    Ok(())
 }
 
 /// 原子写 + 0600。
@@ -65,17 +76,25 @@ pub fn write_private(path: &Path, content: &str) -> std::io::Result<()> {
     let tmp = path.with_file_name(format!("{name}.tmp-{}", uuid::Uuid::new_v4().simple()));
 
     {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // 0600 只在 unix 有意义；Windows 靠用户配置目录本身的 ACL。
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&tmp)?;
         file.write_all(content.as_bytes())?;
         file.flush()?;
         file.sync_all()?;
     }
 
+    // Windows 的 rename 不允许覆盖已存在的目标（会报 AlreadyExists），
+    // unix 则是原子替换。按平台分开处理：先删旧文件再改名。
+    #[cfg(windows)]
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
     fs::rename(&tmp, path)?;
+    #[cfg(unix)]
     let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
     Ok(())
 }

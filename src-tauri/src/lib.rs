@@ -4,6 +4,12 @@
 //! 这样就没有「本地端口无鉴权、可被同机进程或网页调用」的攻击面。
 
 mod api;
+#[cfg(target_os = "macos")]
+mod axdrive;
+// 非 macOS（当前是 Windows）的界面自动化：用 UI Automation 实现，
+// 接口与 macOS 版一致，内部实现各自独立。
+#[cfg(not(target_os = "macos"))]
+#[path = "axdrive_windows.rs"]
 mod axdrive;
 mod credits;
 mod ferry;
