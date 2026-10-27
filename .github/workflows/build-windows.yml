@@ -5,6 +5,10 @@ name: build-windows
 on:
   workflow_dispatch:
   push:
+    branches:
+      # workflow_dispatch 要求工作流文件已在默认分支上，否则无法手动触发。
+      # Windows 移植合并进 main 之前，先靠分支推送来出包。
+      - "feat/windows"
     tags:
       - "v*"
 
