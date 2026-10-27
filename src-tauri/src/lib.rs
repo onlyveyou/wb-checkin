@@ -654,6 +654,29 @@ async fn growth_pending() -> Value {
     json!({ "accounts": items })
 }
 
+/// 交给系统默认程序打开一个链接或文件。
+///
+/// macOS 用 `open`；Windows 用 `cmd /C start` —— 后者会把第一个带引号的参数当成
+/// 窗口标题，所以补一个空标题占位。两处调用（deeplink、OAuth 登录页）都走这里，
+/// 免得平台差异散落成两份。
+pub(crate) fn open_external(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(url).spawn();
+
+    #[cfg(target_os = "windows")]
+    let spawned = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let spawned: std::io::Result<std::process::Child> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "当前平台不支持打开外部链接",
+    ));
+
+    spawned.map(|_| ()).map_err(|error| error.to_string())
+}
+
 /// 打开一个链接（客户端 deeplink 或站内地址）。只放行这两种，避免变成任意命令入口。
 #[tauri::command]
 fn open_link(url: String) -> Result<(), String> {
@@ -661,11 +684,7 @@ fn open_link(url: String) -> Result<(), String> {
     if !(target.starts_with("workbuddy://") || target.starts_with("https://www.workbuddy.cn/")) {
         return Err("只允许打开客户端链接与 workbuddy.cn 站内地址".to_string());
     }
-    std::process::Command::new("open")
-        .arg(target)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    open_external(target)
 }
 
 // ---------------------------------------------------------------------------

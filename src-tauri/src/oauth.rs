@@ -322,19 +322,8 @@ pub fn open_login_page(login_id: &str) -> Result<(), String> {
         return Err(format!("登录地址不在官方域名白名单内，已拒绝打开：{url}"));
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(&url)
-            .spawn()
-            .map_err(|error| format!("打开浏览器失败：{error}"))?;
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err("当前仅支持 macOS 打开登录页".to_string())
-    }
+    // 两平台都交给系统默认浏览器；命令差异收在 `open_external` 里。
+    crate::open_external(&url).map_err(|error| format!("打开浏览器失败：{error}"))
 }
 
 pub fn cancel(login_id: &str) -> bool {
