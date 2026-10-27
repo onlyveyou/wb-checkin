@@ -147,6 +147,19 @@ export interface CreditSummary {
 }
 
 /** 账号切换前的环境检查结果。 */
+/** 客户端路径自动探测的结果（设置页「自动探测」按钮用）。 */
+export interface ClientPathProbe {
+  /** 扫描起点：macOS 是 Application Support，Windows 是 %APPDATA%。 */
+  base: string;
+  /** 扫到的、看起来像客户端数据目录的路径。 */
+  dataRoots: string[];
+  /** 扫到的登录态文件（主文件在前，备份按时间倒序在后）。 */
+  authFiles: string[];
+  /** 当前生效的登录态路径。 */
+  effective: string;
+  effectiveExists: boolean;
+}
+
 export interface SwitchPreflight {
   authFilePath: string;
   authFileExists: boolean;

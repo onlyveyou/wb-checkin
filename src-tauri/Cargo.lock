@@ -4160,7 +4160,7 @@ dependencies = [
 
 [[package]]
 name = "wb-checkin"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "chrono",
  "libc",

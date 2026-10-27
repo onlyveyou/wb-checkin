@@ -332,13 +332,53 @@ fn from_official_record(root: &Value) -> Option<Value> {
     }))
 }
 
+/// 导入失败时的补充说明：把本机扫到的登录态文件列出来，用户照着填就能用。
+///
+/// 自动探测靠「目录名猜得中」，Windows 上客户端发行版一换就可能落空；
+/// 只报一条用户没见过的路径等于让人干瞪眼，所以把扫描结果一并给出。
+fn import_hint() -> String {
+    let probe = crate::switch::probe();
+    let files: Vec<String> = probe
+        .get("authFiles")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if files.is_empty() {
+        return "。请先在官方客户端登录一次；若已登录仍报错，到「设置 → 客户端路径」用「自动探测」选定实际文件。"
+            .to_string();
+    }
+
+    let list = files
+        .iter()
+        .take(5)
+        .map(|file| format!("\n  {file}"))
+        .collect::<Vec<_>>()
+        .join("");
+    format!("。本机扫到这些登录态文件，选一个填到「设置 → 客户端路径」即可：{list}")
+}
+
 /// 从官方本机认证文件导入：当前登录账号 + allAccounts 里的历史账号。
 pub fn import_local() -> Value {
     let path = auth_file_path();
     let Some(root) = crate::paths::read_json_object(&path) else {
+        let reason = if path.exists() {
+            format!("官方登录态文件无法解析：{}", path.to_string_lossy())
+        } else {
+            format!(
+                "未找到官方登录态文件：{}{}",
+                path.to_string_lossy(),
+                import_hint()
+            )
+        };
         return json!({
             "ok": false,
-            "error": format!("未找到官方登录态文件：{}", path.to_string_lossy()),
+            "error": reason,
             "imported": 0,
         });
     };

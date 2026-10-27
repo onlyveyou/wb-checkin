@@ -473,6 +473,15 @@ fn switch_preflight() -> Value {
     switch::preflight()
 }
 
+/// 客户端路径诊断：列出扫到的数据目录与登录态文件，供界面上手选。
+///
+/// 自动探测在 Windows 上依赖「目录名猜得中」，猜空时用户只能干看着一条路径。
+/// 这个命令把探测过程摊开，让用户点一下就能定下来。
+#[tauri::command]
+fn probe_client_paths() -> Value {
+    switch::probe()
+}
+
 #[tauri::command]
 async fn switch_to_account(
     id: String,
@@ -1364,6 +1373,7 @@ pub fn run() {
             fetch_credits_one,
             fetch_credits_all,
             switch_preflight,
+            probe_client_paths,
             switch_to_account,
             profile_list,
             profile_save,

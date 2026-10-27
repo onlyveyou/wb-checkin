@@ -620,3 +620,50 @@ body {
     transition: none;
   }
 }
+
+/* ---------- 客户端路径自动探测结果 ---------- */
+
+/* 探测结果是一列路径，等宽字体 + 单行省略；点一条就填进上面的输入框。 */
+.probe-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.probe-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.probe-item:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.probe-item.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.row-hint code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface-sunken);
+}

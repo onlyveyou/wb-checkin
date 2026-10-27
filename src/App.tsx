@@ -7,6 +7,7 @@ import type {
   Account,
   AppConfig,
   CheckinSummary,
+  ClientPathProbe,
   CreditItem,
   CurrentIdentity,
   LogRecord,
@@ -103,6 +104,9 @@ export default function App() {
   const [clientPaths, setClientPaths] = useState<SwitchPreflight | null>(null);
   /** 手填草稿：不直接写 config，避免每敲一个字就存一次盘。 */
   const [clientPathDraft, setClientPathDraft] = useState({ authFile: "", app: "" });
+  /** 「自动探测」的结果：扫到的数据目录与登录态文件，点一条填进草稿。 */
+  const [probe, setProbe] = useState<ClientPathProbe | null>(null);
+  const [probeBusy, setProbeBusy] = useState(false);
   const [logs, setLogs] = useState<LogRecord[]>([]);
   const [paths, setPaths] = useState<StorePaths | null>(null);
   const [running, setRunning] = useState(false);
@@ -547,6 +551,31 @@ export default function App() {
     }
   };
 
+  /**
+   * 自动探测：把后端扫到的数据目录与登录态文件全列出来，点一条直接填进输入框。
+   *
+   * 自动探测本身靠「客户端数据目录名猜得中」，Windows 上换个发行版就可能落空，
+   * 落空时只给一条用户没见过的路径等于没法自救，所以留这个手选的出口。
+   */
+  const probeClientPaths = async () => {
+    setProbeBusy(true);
+    try {
+      const result = await api.probeClientPaths();
+      setProbe(result);
+      setBanner({
+        kind: result.authFiles.length > 0 ? "ok" : "danger",
+        text:
+          result.authFiles.length > 0
+            ? `在 ${result.base} 下扫到 ${result.authFiles.length} 个登录态文件，点一条即可填入`
+            : `在 ${result.base} 下没扫到登录态文件，请确认客户端已登录过一次`,
+      });
+    } catch (error) {
+      setBanner({ kind: "danger", text: String(error) });
+    } finally {
+      setProbeBusy(false);
+    }
+  };
+
   // 首屏问一次自动探测结果；重新打开设置页时也会用到最新的值。
   useEffect(() => {
     refreshClientPaths().catch(() => undefined);
@@ -743,10 +772,11 @@ export default function App() {
               <div className="hint">点右上角「添加账号」，用独立登录逐个授权多个账号</div>
             </div>
           ) : (
-            accounts.map((account) => (
+            accounts.map((account, index) => (
               <AccountRow
                 key={account.id}
                 account={account}
+                index={index + 1}
                 active={Boolean(account.uid) && account.uid === identity?.loginUid}
                 billing={Boolean(account.uid) && account.uid === identity?.billingUid}
                 today={today}
@@ -1078,6 +1108,43 @@ export default function App() {
                   }
                 />
               </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
+                <button className="btn sm" onClick={probeClientPaths} disabled={probeBusy}>
+                  {probeBusy && <span className="spin" />}
+                  {probeBusy ? "探测中" : "自动探测"}
+                </button>
+                <span className="row-hint" style={{ margin: 0 }}>
+                  扫到的不止一条时，点一条直接填入上面的输入框
+                </span>
+              </div>
+              {probe && (
+                <div className="probe-list">
+                  {probe.authFiles.length === 0 ? (
+                    <div className="row-hint">
+                      在 {probe.base} 下没扫到登录态文件。请确认客户端已登录过一次；
+                      或在资源管理器里搜 <code>workbuddy-desktop.info</code> 后把路径贴到上面。
+                    </div>
+                  ) : (
+                    probe.authFiles.map((file) => (
+                      <button
+                        key={file}
+                        className={`probe-item${
+                          file === clientPathDraft.authFile ? " active" : ""
+                        }`}
+                        onClick={() =>
+                          setClientPathDraft((draft) => ({ ...draft, authFile: file }))
+                        }
+                        title={file}
+                      >
+                        {file}
+                      </button>
+                    ))
+                  )}
+                  {probe.dataRoots.length > 0 && (
+                    <div className="row-hint">扫到的数据目录：{probe.dataRoots.join(" · ")}</div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="row-actions">
               <button className="btn sm" onClick={saveClientPaths}>

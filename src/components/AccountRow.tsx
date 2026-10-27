@@ -3,6 +3,8 @@ import type { Account, CreditItem } from "../types";
 
 interface Props {
   account: Account;
+  /** 在账号列表里的位置（从 1 开始），显示在头像上。 */
+  index: number;
   /** 该账号是否就是客户端当前登录的账号。 */
   active: boolean;
   /** 该账号是否在承担当前消耗（用「只换额度」切过之后可能与登录账号不是同一个）。 */
@@ -34,6 +36,7 @@ function formatExpiry(value: string): string {
 
 export default function AccountRow({
   account,
+  index,
   active,
   billing,
   today,
@@ -50,7 +53,6 @@ export default function AccountRow({
   const [expanded, setExpanded] = useState(false);
 
   const name = account.nickname || account.email || account.uid || "未命名账号";
-  const initial = name.trim().charAt(0) || "?";
 
   const checkedToday = account.lastCheckinDate === today;
   const failedToday = checkedToday && account.lastCheckinResult === "error";
@@ -95,7 +97,9 @@ export default function AccountRow({
           billing && !active ? " billing" : ""
         }`}
       >
-        <div className="avatar">{initial}</div>
+        {/* 头像显示序号而不是昵称首字：账号名多是 uid/手机号打头的一串数字，
+            取了首字常常每个账号都是同一个数字，反而看不出第几个。 */}
+        <div className="avatar">{index}</div>
 
         <div className="identity">
           <div className="name">

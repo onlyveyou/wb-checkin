@@ -22,6 +22,7 @@ import type {
   ProfileSaveResult,
   StorePaths,
   SwitchPreflight,
+  ClientPathProbe,
   SwitchResult,
   SysMetrics,
   UsageSummary,
@@ -111,6 +112,9 @@ export const fetchCreditsOne = (id: string) => invoke<CreditItem>("fetch_credits
 // 账号切换：会覆写官方客户端登录态，restart 为真时还会重启客户端。
 
 export const switchPreflight = () => invoke<SwitchPreflight>("switch_preflight");
+
+/** 客户端路径探测：列出扫到的数据目录与登录态文件，界面上让用户点选。 */
+export const probeClientPaths = () => invoke<ClientPathProbe>("probe_client_paths");
 
 /**
  * 切换账号。

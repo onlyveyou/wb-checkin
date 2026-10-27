@@ -41,15 +41,24 @@ const CLIENT_APP_PATHS: &[&str] = &[
 /// 内部层级保持一致，所以只有根目录不同。
 const AUTH_SUBPATH: &str = "Data/Public/auth/workbuddy-desktop.info";
 
-/// 可能的客户端数据目录名。客户端改名/换发行版时全落空，这时靠 Windows 侧的
-/// 目录扫描兜底（见 `scan_data_root_for_auth`），或用户在设置里手填。
+/// 可能的客户端数据目录名。客户端改名/换发行版时全落空，这时靠目录扫描兜底
+/// （见 `scan_data_root_for_auth`），或用户在设置里手填。
+///
+/// 实测 macOS 上是 `CodeBuddyExtension`；Windows 上客户端装的是哪一版没法先验，
+/// `WorkBuddyExtension` / `CodeBuddy CN` 等发行版都用过，逐一列出比猜一个稳。
 const CLIENT_DATA_DIRS: &[&str] = &[
     "CodeBuddyExtension",
+    "WorkBuddyExtension",
     "WorkBuddy",
     "workbuddy",
     "CodeBuddy CN",
     "CodeBuddy",
+    "codebuddy-extension",
+    "workbuddy-extension",
 ];
+
+/// 登录态文件所在子目录（相对客户端数据根）。官方是第一个，其余是历史形态。
+const AUTH_SUBDIRS: &[&str] = &["Data/Public/auth", "Data/auth", "auth"];
 
 fn home_dir() -> PathBuf {
     crate::paths::home_dir()
@@ -85,31 +94,140 @@ fn auth_file_candidates() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Windows：客户端的数据目录名无法先验确定，扫一遍用户数据根下的一级目录，
-/// 看谁的 `Data/Public/auth/workbuddy-desktop.info` 存在。
+/// 在一个候选数据目录里找登录态文件，返回**文件名以 `workbuddy-desktop` 开头、
+/// 以 `.info` 结尾**的那几个路径（正序，主文件在前）。
 ///
-/// 只读目录项，不读文件内容；`%APPDATA%` 下通常几十个目录，开销可忽略。
-#[cfg(target_os = "windows")]
-fn scan_data_root_for_auth() -> Option<PathBuf> {
-    let root = user_data_root();
-    let entries = std::fs::read_dir(&root).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+/// 之所以不写死 `Data/Public/auth/workbuddy-desktop.info`：不同发行版的层级
+/// 变过（也见过直接放在 `<数据根>/auth/` 下的），而同一目录里还躺着
+/// `workbuddy-desktop.<时间戳>.info` 这种备份 —— 主文件优先，备份只作为兜底候选。
+fn auth_files_in(data_root: &Path) -> Vec<PathBuf> {
+    let mut primary: Vec<PathBuf> = Vec::new();
+    let mut backups: Vec<PathBuf> = Vec::new();
+
+    for sub in AUTH_SUBDIRS {
+        let dir = data_root.join(sub);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
-        }
-        let candidate = path.join(AUTH_SUBPATH);
-        if candidate.exists() {
-            return Some(candidate);
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if !name.starts_with("workbuddy-desktop") || !name.ends_with(".info") {
+                continue;
+            }
+            if name == "workbuddy-desktop.info" {
+                primary.push(path);
+            } else {
+                backups.push(path);
+            }
         }
     }
-    None
+
+    // 备份按文件名倒序：时间戳在名字里，越大越新。
+    backups.sort();
+    backups.reverse();
+    primary.extend(backups);
+    primary
+}
+
+/// 扫一遍用户数据根，找像客户端数据目录的那些（含标准 auth 子目录）。
+///
+/// 一层不够：见过 Electron 应用把 userData 放在 `<根>/<厂商>/<应用>` 的。
+/// 两层的开销也就是几百次 `is_dir`，可以忽略。
+fn scan_data_roots() -> Vec<PathBuf> {
+    let root = user_data_root();
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let mut consider = |path: PathBuf, found: &mut Vec<PathBuf>| {
+        if !path.is_dir() {
+            return;
+        }
+        if !AUTH_SUBDIRS.iter().any(|sub| path.join(sub).is_dir()) {
+            return;
+        }
+        let key = path.to_string_lossy().to_ascii_lowercase();
+        if seen.insert(key) {
+            found.push(path);
+        }
+    };
+
+    for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        let path = entry.path();
+        consider(path.clone(), &mut found);
+        for sub in std::fs::read_dir(&path).into_iter().flatten().flatten() {
+            consider(sub.path(), &mut found);
+        }
+    }
+
+    found
+}
+
+/// 诊断用：把「我到底找过哪些地方、找到了什么」原样交给界面。
+///
+/// 客户端数据目录名在不同发行版之间变过好几次，靠猜名单总有猜空的时候。
+/// 猜空时用户看到的只是一句「未找到官方登录态文件」加一条自己也没见过的路径，
+/// 没法自救。这里把候选根目录、扫到的 `*.info`、以及当前生效的路径一并返回，
+/// 界面上一层列表让用户点选即可。
+pub fn probe() -> Value {
+    let root = user_data_root();
+
+    let mut data_roots: Vec<PathBuf> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push_root = |path: PathBuf, data_roots: &mut Vec<PathBuf>| {
+        let key = path.to_string_lossy().to_ascii_lowercase();
+        if path.is_dir() && seen.insert(key) {
+            data_roots.push(path);
+        }
+    };
+
+    for name in CLIENT_DATA_DIRS {
+        push_root(root.join(name), &mut data_roots);
+    }
+    for found in scan_data_roots() {
+        push_root(found, &mut data_roots);
+    }
+
+    let mut auth_files: Vec<String> = Vec::new();
+    for data_root in &data_roots {
+        for path in auth_files_in(data_root) {
+            let text = path.to_string_lossy().into_owned();
+            if !auth_files.iter().any(|known| known.eq_ignore_ascii_case(&text)) {
+                auth_files.push(text);
+            }
+        }
+    }
+
+    let effective = auth_file_path();
+    json!({
+        "base": root.to_string_lossy(),
+        "dataRoots": data_roots
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        "authFiles": auth_files,
+        "effective": effective.to_string_lossy(),
+        "effectiveExists": effective.exists(),
+    })
+}
+
+/// 数据目录名猜不中时的兜底：扫一遍用户数据根，取第一个有登录态文件的。
+///
+/// 两平台共用 —— macOS 上候选名是准的，很少走到这里，但走到时同样得能兜住
+/// （客户端改名过好几次）。只在候选全部落空时才调用，开销无所谓。
+fn scan_data_root_for_auth() -> Option<PathBuf> {
+    scan_data_roots()
+        .into_iter()
+        .find_map(|data_root| auth_files_in(&data_root).into_iter().next())
 }
 
 /// 官方登录态文件路径。
 ///
-/// 解析顺序：设置里手填的路径 → 已知数据目录名里存在的那个 → Windows 目录扫描 →
-/// 第一个候选（用于尚未登录过、需要提示用户先登录的场景）。
+/// 解析顺序：设置里手填的路径 → 已知数据目录名里存在的那个 → 目录扫描 →
+/// 候选里第一个扫到文件的那个 → 第一个候选（用于尚未登录过、需要提示用户先登录的场景）。
 pub fn auth_file_path() -> PathBuf {
     let custom = crate::paths::load_config().client_auth_file;
     if !custom.trim().is_empty() {
@@ -121,7 +239,6 @@ pub fn auth_file_path() -> PathBuf {
         return found.clone();
     }
 
-    #[cfg(target_os = "windows")]
     if let Some(found) = scan_data_root_for_auth() {
         return found;
     }
