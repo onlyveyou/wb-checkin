@@ -1,6 +1,6 @@
 [package]
 name = "wb-checkin"
-version = "0.10.2"
+version = "0.10.3"
 description = "WB 签到 —— WorkBuddy / CodeBuddy 多账号每日自动签到"
 authors = ["you"]
 edition = "2021"
@@ -16,10 +16,21 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net"] }
+# stream：国际版摆渡要边收边下发给客户端，必须能拿字节流而不是整包缓冲。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "net", "io-util"] }
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
+# 国际版摆渡（src/wbai.rs）在进程内起一个 OpenAI 兼容的本地 HTTP 服务。
+# 这四件在依赖树里本来就有（reqwest 带进来的 hyper 1.11 / hyper-util 0.1.20 /
+# http-body-util 0.1.5 / futures-util 0.3），显式声明只是为了让版本被 Cargo 固定住，
+# 不会引入新的编译单元。base64 用来解开 JWT 里能公开读的字段（只显示账号，不验签）。
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = { version = "0.1", features = ["full"] }
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+base64 = "0.22"
 # 菜单栏两行标题要绕过 Tauri 的 set_title 直接设 NSAttributedString，
 # 只用到 objc2 的 msg_send，不引入整套 objc2-app-kit（它已在依赖树里）。
 # libc 同样只在 macOS 用：内存/磁盘/网卡读数调 mach 的 host_statistics64、

@@ -446,3 +446,105 @@ export interface FerryLogTail {
   file?: string;
   lines: string[];
 }
+
+// ---------------------------------------------------------------------------
+// 国际版摆渡
+//
+// 与模型摆渡（ferry）是两件事：ferry 借 opencode 的免费模型，这里借的是**国际版账号**
+// 自己的模型额度。两者互不影响，可以同时开（端口不同）。
+// ---------------------------------------------------------------------------
+
+/** 国际版服务状态。`phase` 只有 stopped / ready 两种：起来就是 ready，没起来就 stopped。 */
+export interface WbaiStatus {
+  running: boolean;
+  phase: "stopped" | "ready";
+  message?: string;
+  port: number;
+  endpoint: string;
+  dataDir?: string;
+  loggedIn: boolean;
+  account?: string | null;
+  /** 目录规模。头部一行直接显示，省掉一次额外请求。 */
+  models?: { total: number; free: number; selected: number };
+}
+
+/** 单个模型的探测结论。`status` 是后端归好类的档位，不直接对应上游错误码。 */
+export interface WbaiVerdict {
+  ok: boolean;
+  status:
+    | "ok"
+    | "not_allowed"
+    | "illegal"
+    | "not_found"
+    | "quota"
+    | "rate_limit"
+    | "timeout"
+    | "unreachable"
+    | "no_login"
+    | "error";
+  error?: string | null;
+  ms?: number;
+  at?: number;
+}
+
+/** 模型目录里的一项。`credits` 是后端算好的短文案：「免费」/「0.29×」/「—」。 */
+export interface WbaiModel {
+  id: string;
+  name: string;
+  credits: string;
+  free: boolean;
+  input?: number | null;
+  output?: number | null;
+  images: boolean;
+  tools: boolean;
+  reasoning: boolean;
+  selected: boolean;
+  verdict?: WbaiVerdict | null;
+}
+
+export interface WbaiModels {
+  models: WbaiModel[];
+  source: string;
+  total: number;
+  free: number;
+  selected: number;
+  ready: number;
+  catalogDir?: string;
+  endpoint?: string;
+}
+
+export interface WbaiProbeResult {
+  ok?: boolean;
+  error?: string;
+  results?: Record<string, WbaiVerdict>;
+  probed?: number;
+  taken?: number;
+}
+
+/** 国际版账号态（不联网，纯读本地 token）。 */
+export interface WbaiAccount {
+  loggedIn: boolean;
+  account?: string | null;
+  expiresAt?: number | null;
+  remainingDays?: number | null;
+  hasRefresh?: boolean;
+}
+
+export interface WbaiLoginPoll {
+  done: boolean;
+  status: "pending" | "ok" | "error";
+  account?: string | null;
+  error?: string | null;
+  expiresIn: number;
+}
+
+export interface WbaiImportResult {
+  ok?: boolean;
+  count?: number;
+  /** id 撞上用户自己配的模型而跳过的，要如实告诉用户，不能静默少导。 */
+  skipped?: string[];
+  file?: string;
+  endpoint?: string;
+  restart?: string;
+  error?: string;
+}

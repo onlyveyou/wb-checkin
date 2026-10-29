@@ -26,6 +26,12 @@ import type {
   SwitchResult,
   SysMetrics,
   UsageSummary,
+  WbaiAccount,
+  WbaiImportResult,
+  WbaiLoginPoll,
+  WbaiModels,
+  WbaiProbeResult,
+  WbaiStatus,
 } from "./types";
 
 export const listAccounts = () => invoke<Account[]>("list_accounts");
@@ -232,3 +238,44 @@ export const axProbe = () =>
   invoke<{ path: string; lines: number; windows: number; head: string }>("ax_probe");
 
 export const axRequestTrust = () => invoke<AxStatus>("ax_request_trust");
+
+// ---------------------------------------------------------------------------
+// 国际版摆渡
+//
+// 登录沿用与国内版同一套交互（申请 → 打开浏览器 → 轮询），后端命令前缀是 `wbai_`。
+// ---------------------------------------------------------------------------
+
+export const wbaiStatus = () => invoke<WbaiStatus>("wbai_status");
+
+export const wbaiAccount = () => invoke<WbaiAccount>("wbai_account");
+
+export const wbaiStart = () => invoke<WbaiStatus>("wbai_start");
+
+export const wbaiStop = () => invoke<WbaiStatus>("wbai_stop");
+
+export const wbaiLoginStart = () => invoke<OAuthStart>("wbai_login_start");
+
+export const wbaiLoginOpen = (loginId: string) =>
+  invoke<void>("wbai_login_open", { loginId });
+
+export const wbaiLoginPoll = (loginId: string) =>
+  invoke<WbaiLoginPoll>("wbai_login_poll", { loginId });
+
+export const wbaiLoginCancel = (loginId: string) =>
+  invoke<boolean>("wbai_login_cancel", { loginId });
+
+export const wbaiLogout = () => invoke<WbaiAccount>("wbai_logout");
+
+/** 模型目录 + 当前勾选 + 上次探测结论。目录在后端有 30 秒缓存，随取随用。 */
+export const wbaiModels = () => invoke<WbaiModels>("wbai_models");
+
+/** scope = "all" 测整个目录，否则只测已勾选的；force 忽略探测缓存。 */
+export const wbaiProbe = (scope: "all" | "selected" = "selected", force = false) =>
+  invoke<WbaiProbeResult>("wbai_probe", { scope, force });
+
+export const wbaiSelection = (model: string, selected: boolean) =>
+  invoke<{ ok: boolean; count: number }>("wbai_selection", { model, selected });
+
+export const wbaiImport = () => invoke<WbaiImportResult>("wbai_import");
+
+export const wbaiLogs = (lines = 120) => invoke<FerryLogTail>("wbai_logs", { lines });

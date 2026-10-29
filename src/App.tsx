@@ -21,6 +21,7 @@ import AccountRow from "./components/AccountRow";
 import AddAccountDialog from "./components/AddAccountDialog";
 import FerryPanel from "./components/FerryPanel";
 import LocalAiPanel from "./components/LocalAiPanel";
+import WbaiPanel from "./components/WbaiPanel";
 import SwitchDialog from "./components/SwitchDialog";
 
 function dateKey(date: Date): string {
@@ -94,7 +95,7 @@ const MENUBAR_OPTIONS: { key: string; label: string; hint: string }[] = [
   { key: "mem", label: "内存", hint: "已用物理内存比例，写作 MEM 61%" },
 ];
 
-type Tab = "checkin" | "ai" | "ferry";
+type Tab = "checkin" | "ai" | "ferry" | "wbai";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("checkin");
@@ -697,10 +698,18 @@ export default function App() {
           >
             模型摆渡
           </button>
+          <button
+            className={`tab${tab === "wbai" ? " on" : ""}`}
+            onClick={() => setTab("wbai")}
+          >
+            国际版摆渡
+          </button>
         </div>
 
         {tab === "ferry" ? (
           <FerryPanel active={tab === "ferry"} onError={showError} />
+        ) : tab === "wbai" ? (
+          <WbaiPanel active={tab === "wbai"} onError={showError} />
         ) : tab === "ai" ? (
           <LocalAiPanel
             config={config.local_ai}

@@ -24,6 +24,7 @@ mod profile;
 mod store;
 mod switch;
 mod sysmon;
+mod wbai;
 
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -923,6 +924,85 @@ fn ferry_logs(lines: Option<usize>) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// 国际版摆渡
+//
+// 与 ferry 同一套交互：登录走「申请 state → 系统浏览器打开 → 前端轮询」，服务起停走 IPC。
+// 差别在实现：ferry 靠内置 Node sidecar 驱动 opencode，这里全部是本进程内的 Rust，
+// 不依赖任何外部运行时，所以能直接打进 .app 分发。
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn wbai_status() -> Value {
+    wbai::status().await
+}
+
+#[tauri::command]
+fn wbai_account() -> Value {
+    wbai::account()
+}
+
+#[tauri::command]
+async fn wbai_start() -> Result<Value, String> {
+    wbai::start().await
+}
+
+#[tauri::command]
+async fn wbai_stop() -> Result<Value, String> {
+    wbai::stop().await
+}
+
+#[tauri::command]
+async fn wbai_login_start() -> Result<Value, String> {
+    wbai::start_login().await
+}
+
+#[tauri::command]
+fn wbai_login_open(login_id: String) -> Result<(), String> {
+    wbai::open_login_page(&login_id)
+}
+
+#[tauri::command]
+async fn wbai_login_poll(login_id: String) -> Value {
+    wbai::poll_login(&login_id).await
+}
+
+#[tauri::command]
+fn wbai_login_cancel(login_id: String) -> bool {
+    wbai::cancel_login(&login_id)
+}
+
+#[tauri::command]
+fn wbai_logout() -> Value {
+    wbai::logout()
+}
+
+#[tauri::command]
+fn wbai_models() -> Value {
+    wbai::models_view()
+}
+
+#[tauri::command]
+async fn wbai_probe(scope: Option<String>, force: Option<bool>) -> Value {
+    wbai::probe_models(scope.as_deref().unwrap_or("selected"), force.unwrap_or(false)).await
+}
+
+#[tauri::command]
+fn wbai_selection(model: String, selected: bool) -> Result<Value, String> {
+    wbai::set_selection(model, selected)
+}
+
+#[tauri::command]
+fn wbai_import() -> Value {
+    wbai::import_selected()
+}
+
+#[tauri::command]
+fn wbai_logs(lines: Option<usize>) -> Value {
+    wbai::logs(lines.unwrap_or(120))
+}
+
+
+// ---------------------------------------------------------------------------
 // 菜单栏常驻
 //
 // 点窗口关闭按钮不退出进程，只把窗口收起来，签到调度继续在后台跑——这是
@@ -1332,6 +1412,8 @@ pub fn run() {
             spawn_scheduler(app.handle().clone());
             // 上次退出前主动开过「模型摆渡」才自动拉起；默认关闭，不占端口。
             ferry::autostart_on_launch();
+            // 国际版摆渡同理：开过才拉起，且必须有已保存的登录态才会真的起。
+            wbai::autostart_on_launch();
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -1404,6 +1486,20 @@ pub fn run() {
             ferry_selection,
             ferry_set_proxy,
             ferry_logs,
+            wbai_status,
+            wbai_account,
+            wbai_start,
+            wbai_stop,
+            wbai_login_start,
+            wbai_login_open,
+            wbai_login_poll,
+            wbai_login_cancel,
+            wbai_logout,
+            wbai_models,
+            wbai_probe,
+            wbai_selection,
+            wbai_import,
+            wbai_logs,
             popover_hide,
             popover_open_main,
             popover_resize,
@@ -1419,7 +1515,11 @@ pub fn run() {
         // 而 macOS 的 ⟩退出 / AppleScript `quit` 走 NSApp terminate，只发 `Exit`。
         // 实测只接前者时，退出后子进程仍活着并握着端口。`stop_blocking` 是幂等的。
         match event {
-            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => ferry::stop_blocking(),
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+                ferry::stop_blocking();
+                // 国际版摆渡是进程内的任务，退出时一并 abort，否则端口会留到下次上电。
+                wbai::stop_blocking();
+            }
             _ => {}
         }
 
