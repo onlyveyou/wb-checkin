@@ -1,0 +1,51 @@
+name: verify-windows
+
+# 目的：push 到 main 时就把 Windows 编译验一遍，而不是等到打 tag 才发现编译坏了。
+#
+# 与 build-windows.yml 的分工：
+#   - build-windows.yml：打 tag 时跑，产出对外分发的 NSIS 安装包并挂 Release。
+#   - 本文件：只在 main 上跑，`--no-bundle` 只编译不打包、不上传任何产物，
+#     所以不会因为分支推送而产生可下载的安装包。
+#
+# 纯文档改动不触发（paths-ignore），省 CI 时间。
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+      - "scripts/*.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一分支连续推送时，取消还没跑完的旧任务 —— 验证的是最新代码，旧的没有意义。
+concurrency:
+  group: verify-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend deps
+        run: npm ci
+
+      # beforeBuildCommand 里已带 `tsc && vite build`，这一步同时验证前端类型检查与 Rust 编译。
+      - name: Compile (no bundle)
+        run: npx tauri build --no-bundle

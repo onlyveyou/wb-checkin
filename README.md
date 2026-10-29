@@ -384,6 +384,23 @@ npm install
 npm run app:build       # 产物在 src-tauri/target/release/bundle/
 ```
 
+升版本用单一入口，它同步四处并插入 CHANGELOG 条目（手工改容易漏掉 `Cargo.lock`）：
+
+```bash
+scripts/bump-version.sh 0.11.0            # 改版本号 + 在 CHANGELOG 顶部插入待填条目
+scripts/bump-version.sh 0.11.0 --dry-run  # 只看会改什么，不落盘
+```
+
+发布顺序：
+
+1. 填 `CHANGELOG.md` 里新版本的条目
+2. `npm run app:build` 构建，dmg 归档到仓库根 `WB-Checkin-<版本>-arm64.dmg`
+3. 提交并 push 到 `main` —— `verify-windows` 自动跑一遍 Windows 编译（`--no-bundle`，只编译不打包、不产出安装包）
+4. 绿了再打标签 `git tag -a v<版本> -m "..."` 并 `git push origin v<版本>`，触发 `build-windows` 产出 NSIS 安装包并自动挂到 Release
+5. `gh release edit` 写说明、`gh release upload` 传 dmg
+
+**先验证再打标签**：标签是对外可见的，编译失败时不该已经存在一个公开的坏版本。
+
 开发调试：
 
 ```bash
