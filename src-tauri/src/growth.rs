@@ -273,6 +273,85 @@ fn pending_view(item: &Value) -> Option<Value> {
     }))
 }
 
+/// 百分号解码。只处理 `%XX` 与 `+`，够用就行 —— 引一个 crate 只为这两个字符不值当。
+fn percent_decode(input: &str) -> String {
+    fn hex(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                out.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+        }
+        if bytes[index] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[index]);
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+/// 从一个 `workbuddy://` 链接的查询串里取 `expertId`。
+fn expert_id_in_deeplink(link: &str) -> Option<String> {
+    if !link.starts_with("workbuddy://") {
+        return None;
+    }
+    let query = link.split_once('?')?.1;
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("expertId=") {
+            let id = percent_decode(value);
+            let id = id.trim();
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 从任务的跳转链接里取专家 id。
+///
+/// 线上实际有三种形态（2026-11-06 按真实数据核对）：
+/// 1. `workbuddy://experts?expertId=ex_xxx` —— 直接是 deeplink；
+/// 2. `https://www.workbuddy.cn/work/launch/?deeplink=workbuddy%3A%2F%2Fexperts%3FexpertId%3Dex_xxx&buddy_type=workbuddy`
+///    —— 站内中转页，expertId 藏在二次编码的 `deeplink` 参数里，**这是最常见的一种**；
+/// 3. `workbuddy://expert`、`workbuddy://library`、`https://…/events/follow-guide/`
+///    —— 不带 expertId，界面自动化无从下手。
+///
+/// 只处理前两种；第三种返回 None，调用方据此退回「只打开链接」。
+pub fn expert_id_from_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("workbuddy://") {
+        return expert_id_in_deeplink(trimmed);
+    }
+
+    // 站内中转页：把 deeplink 参数解出来再看
+    let query = trimmed.split_once('?')?.1;
+    for pair in query.split('&') {
+        if let Some(raw) = pair.strip_prefix("deeplink=") {
+            return expert_id_in_deeplink(&percent_decode(raw));
+        }
+    }
+    None
+}
+
 /// 任务是否已经「完成」（可以领奖）。
 ///
 /// 服务端用 `progress.current >= progress.target` 表示完成，另有 `completed` 状态；
@@ -500,6 +579,56 @@ pub async fn pending_only(account: &Value) -> Value {
     json!({ "ok": true, "message": Value::Null, "pending": pending })
 }
 
+/// 单个任务此刻的进度。
+///
+/// 界面自动化做完之后必须回查这一项：进度是从客户端里的真实行为反推的，
+/// 「消息发出去了」不等于「服务端认了」。之前只报「已发送」就宣布成功，
+/// 结果任务进度一直是 0/1 —— 那是在骗自己。
+///
+/// 返回 `{ found, current, target, done, status }`；查不到任务时 `found` 为 false。
+pub async fn task_state(account: &Value, code: &str) -> Value {
+    let blank = json!({
+        "found": false, "current": 0, "target": 0, "done": false, "status": "",
+    });
+    let code = code.trim();
+    if code.is_empty() {
+        return blank;
+    }
+
+    let extra = headers(account);
+    let response = api::get_json(account, &format!("{PREFIX}/tasks"), &extra).await;
+    if !api::success(&response) {
+        return blank;
+    }
+
+    let data = data_of(&response);
+    let items = dig(&data, &["tasks", "list", "records"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let Some(item) = items
+        .iter()
+        .find(|item| task_code(item).as_deref() == Some(code))
+    else {
+        return blank;
+    };
+
+    let progress = item.get("progress").filter(|value| !value.is_null());
+    let current = progress.and_then(|p| number(p.get("current"))).unwrap_or(0);
+    // target 缺失或为 0 时兜底 1：`current >= target` 不能因为 0 而误判成完成
+    let target = progress
+        .and_then(|p| number(p.get("target")))
+        .filter(|target| *target > 0)
+        .unwrap_or(1);
+    json!({
+        "found": true,
+        "current": current,
+        "target": target,
+        "done": task_completed(item),
+        "status": task_status(item),
+    })
+}
+
 async fn round(account: &Value, with_lottery: bool) -> (Value, bool) {
     let (travel_result, travel_auth) = travel(account).await;
     let (tasks_result, tasks_auth) = tasks(account).await;
@@ -647,6 +776,57 @@ mod tests {
             "accept_status": "accepted",
             "progress": { "current": 0, "target": 0 }
         })));
+    }
+
+    #[test]
+    fn expert_id_is_read_from_deeplink_only() {
+        assert_eq!(
+            expert_id_from_url("workbuddy://experts?expertId=ex_1"),
+            Some("ex_1".to_string())
+        );
+        // 参数顺序不固定
+        assert_eq!(
+            expert_id_from_url("workbuddy://experts?from=task&expertId=ex_2"),
+            Some("ex_2".to_string())
+        );
+        // 没有 expertId 的体验任务（关注公众号、授权连接器）自动化帮不上忙
+        assert_eq!(expert_id_from_url("workbuddy://tasks"), None);
+        assert_eq!(expert_id_from_url("workbuddy://experts?expertId="), None);
+        assert_eq!(expert_id_from_url("workbuddy://expert"), None, "线上真有这种不带 id 的");
+        assert_eq!(expert_id_from_url("https://www.workbuddy.cn/events/follow-guide/"), None);
+        assert_eq!(expert_id_from_url(""), None);
+    }
+
+    /// 线上最常见的形态：站内中转页把 deeplink 二次编码放在查询串里。
+    #[test]
+    fn expert_id_is_read_through_encoded_launch_url() {
+        let url = "https://www.workbuddy.cn/work/launch/?deeplink=workbuddy%3A%2F%2Fexperts%3FexpertId%3Dex_GDl31WahyIH0&buddy_type=workbuddy";
+        assert_eq!(
+            expert_id_from_url(url),
+            Some("ex_GDl31WahyIH0".to_string()),
+            "中转页里的 expertId 必须能解出来，否则「去体验」只会打开网页"
+        );
+
+        // buddy_type 在 deeplink 前面也要认
+        let reordered = "https://www.workbuddy.cn/work/launch/?buddy_type=workbuddy&deeplink=workbuddy%3A%2F%2Fexperts%3FexpertId%3Dex_WZY136wV5aMt";
+        assert_eq!(
+            expert_id_from_url(reordered),
+            Some("ex_WZY136wV5aMt".to_string())
+        );
+
+        // 中转页但 deeplink 里没有 expertId
+        let no_id = "https://www.workbuddy.cn/work/launch/?deeplink=workbuddy%3A%2F%2Flibrary";
+        assert_eq!(expert_id_from_url(no_id), None);
+    }
+
+    #[test]
+    fn percent_decode_handles_escapes_and_literals() {
+        assert_eq!(percent_decode("workbuddy%3A%2F%2F"), "workbuddy://");
+        assert_eq!(percent_decode("a+b"), "a b");
+        // 残缺的转义原样保留，不能吃掉字符
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("纯中文"), "纯中文");
     }
 
     #[test]

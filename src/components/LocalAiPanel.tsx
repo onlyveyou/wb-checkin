@@ -277,16 +277,21 @@ export default function LocalAiPanel({ config, active, onConfig, onError }: Prop
         return null;
       }
       const listening = detect.ports.filter((item) => item.listening);
+      // 进程扫出来但配置里没写的：这些就是「还有更多的」那些
+      const extra = detect.discovered.filter((item) => !item.inConfig);
       if (detect.deployed) {
         const parts = [
           listening.length > 0
             ? `${listening.map((item) => `${item.port}`).join(" / ")} 端口在监听`
             : "没有端口在监听",
+          extra.length > 0
+            ? `另有 ${extra.length} 个 llama-server 进程（${extra.map((item) => item.port).join(" / ")}）不在配置里，启用后会一并显示`
+            : null,
           detect.logDirExists
             ? `日志目录存在，共 ${detect.logFiles} 个文件`
             : `日志目录不存在（${detect.logDir}）`,
           detect.smctemp ? "已找到 smctemp" : "未找到 smctemp",
-        ];
+        ].filter(Boolean);
         return { tone: "ok" as const, text: `检测到本机部署过本地 AI：${parts.join("；")}。` };
       }
       const missing = [
@@ -344,6 +349,7 @@ export default function LocalAiPanel({ config, active, onConfig, onError }: Prop
               </span>
               <span className="pill">:{service.port}</span>
               {service.tcpOnly && <span className="pill">仅 TCP 探测</span>}
+              {service.source === "auto" && <span className="pill">自动发现</span>}
               {service.tasks.length > 0 && (
                 <span className="pill ok">{service.tasks.length} 个任务</span>
               )}

@@ -53,6 +53,15 @@ const AI_POLL_MS = 5_000;
 const CORE_POLL_MS = 10_000;
 
 /**
+ * 面板里最多列几个服务。
+ *
+ * 服务清单现在会随本机实际运行的后端变长（进程自动发现），面板高度是按内容
+ * 自适应的，`.pop` 只有 `max-height: 100vh` 兜底 —— 列满十个会把整个面板顶出
+ * 屏幕底部，连「立即签到」都够不着。超出部分在主窗口看，那里是卡片流。
+ */
+const POP_SVC_MAX = 6;
+
+/**
  * 面板关着时的兜底轮询间隔。
  *
  * 正常路径是「后端弹出 → 发 popover-shown → 前端刷新」，但这条链路一旦哑掉
@@ -310,7 +319,7 @@ export default function PopoverApp() {
               </div>
             )}
             <ul className="pop-svc">
-              {services.map((s) => (
+              {services.slice(0, POP_SVC_MAX).map((s) => (
                 <li key={s.key}>
                   <span className={`pop-svc-dot is-${s.state}`} />
                   <span className="pop-svc-name">{s.name}</span>
@@ -321,6 +330,11 @@ export default function PopoverApp() {
                 </li>
               ))}
             </ul>
+            {services.length > POP_SVC_MAX && (
+              <div className="pop-meta">
+                还有 {services.length - POP_SVC_MAX} 个服务，在主窗口「本地 AI」页查看
+              </div>
+            )}
             {ai && ai.tasks.length > 0 && (
               <div className="pop-meta">正在推理 {ai.tasks.length} 个任务</div>
             )}

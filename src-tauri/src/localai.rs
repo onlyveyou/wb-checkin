@@ -8,16 +8,22 @@
 //! - 文本 / 视觉后端直连 `/v1/models` 与 `/slots`；
 //! - 三态 ready / cold（网关空闲，属设计内行为，不是故障）/ down。
 //!
+//! 服务清单有两个来源（2026-10-30 加）：
+//! - **配置**：`local_ai.services`，默认三条。按需网关这类扫不到的只能写在这里；
+//! - **自动发现**：扫 `ps` 找正在运行的 `llama-server`，按端口去重后补进清单。
+//!   配置是默认假设，本机事实以进程为准 —— 多起来的后端不该看不见。
+//!   自动发现的服务一定正在运行，所以对它们做 HTTP 探活是安全的。
+//!
 //! 未部署本地 AI 的机器上，本模块同样可用：探测会如实返回「没有服务在听」，
 //! 不会报错。功能开关默认关闭，关闭时不做任何探测。
 
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::paths::{self, LocalAiConfig, LocalAiService};
@@ -181,6 +187,159 @@ async fn probe_all(services: &[LocalAiService]) -> Vec<Value> {
         })
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// 自动发现：本机正在运行的 llama-server
+//
+// 配置里的三条是「默认假设」，不是本机事实。用户可能还有别的后端在跑
+// （多个模型并行、临时起的第二个 server），这些只在进程命令行里，配置里没有。
+//
+// 只扫进程，不猜端口、不发任何请求：
+// - `ps` 输出里带 `llama-server` 的进程才算候选，别的进程一律不看；
+// - 端口只认 `--port` / `--port=N`，模型只认 `--model` / `-m`，别名只认 `--alias` / `-a`；
+// - 绑在非 loopback 地址上的不纳入监控（监控只看本机）。
+//
+// 扫出来的服务一定正在运行，所以对它们做 HTTP 探活是安全的 —— 不像按需网关，
+// 这些是已经起好的 llama-server，`/v1/models` 只是一次普通查询。
+// ---------------------------------------------------------------------------
+
+/// 进程扫描的缓存时长。状态轮询最快 2 秒一次，每次都 fork 一个 `ps` 不值当。
+const DISCOVERY_TTL: Duration = Duration::from_secs(15);
+
+/// 取某个命令行参数的值，同时支持 `--flag value` 与 `--flag=value`。
+fn arg_value<'a>(args: &[&'a str], names: &[&str]) -> Option<&'a str> {
+    for (index, arg) in args.iter().enumerate() {
+        for name in names {
+            if arg == name {
+                return args.get(index + 1).copied();
+            }
+            // `--port=8081` 这种写法；必须紧跟 `=`，否则 `--portx` 会被误认
+            if let Some(rest) = arg.strip_prefix(name) {
+                if let Some(value) = rest.strip_prefix('=') {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 命令行是否是 llama.cpp 的 server 进程。
+///
+/// 只认可执行文件名**完全等于** `llama-server` 的 token：放宽成前缀匹配的话，
+/// `--alias llama-server-2` 这类参数值、`'echo llama-server'` 这种 shell 字面量
+/// 都会混进来，凭空多出一行不存在的服务。
+fn is_llama_server(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .any(|token| token.rsplit('/').next().unwrap_or(token) == "llama-server")
+}
+
+/// 监听地址是否在本机。缺省 `--host` 时 llama-server 绑 127.0.0.1。
+fn is_loopback_host(host: &str) -> bool {
+    matches!(
+        host,
+        "127.0.0.1" | "localhost" | "0.0.0.0" | "::" | "::1" | "[::1]"
+    )
+}
+
+/// 从一行命令行里解析出一个被监控服务。解析不出端口就返回 None。
+fn parse_llama_command(command: &str) -> Option<LocalAiService> {
+    if !is_llama_server(command) {
+        return None;
+    }
+    let args: Vec<&str> = command.split_whitespace().collect();
+
+    if let Some(host) = arg_value(&args, &["--host"]) {
+        if !is_loopback_host(host) {
+            return None;
+        }
+    }
+
+    let port = arg_value(&args, &["--port"])?.parse::<u16>().ok()?;
+    if port == 0 {
+        return None;
+    }
+
+    let alias = arg_value(&args, &["--alias", "-a"]).map(str::to_string);
+    // llama.cpp 给的是完整路径，界面只关心文件名
+    let model = arg_value(&args, &["--model", "-m"]).map(|path| {
+        Path::new(path)
+            .file_name()
+            .map(|part| part.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string())
+    });
+
+    Some(LocalAiService {
+        key: format!("auto-{port}"),
+        port,
+        name: alias.unwrap_or_else(|| "llama.cpp 后端".to_string()),
+        desc: model.unwrap_or_else(|| "本机进程自动发现".to_string()),
+        // 进程正在跑，HTTP 探活不会产生副作用
+        tcp_only: false,
+    })
+}
+
+#[cfg(unix)]
+fn scan_llama_processes() -> Vec<LocalAiService> {
+    let Ok(output) = Command::new("ps")
+        .args(["-axo", "command="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut seen = HashSet::new();
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let Some(service) = parse_llama_command(line) else {
+            continue;
+        };
+        // 同一端口只留一条：`ps` 里可能出现包装进程与真正的 server 各一行
+        if seen.insert(service.port) {
+            found.push(service);
+        }
+    }
+
+    found.sort_by_key(|service| service.port);
+    found
+}
+
+/// Windows 上拿不到可靠的全命令行（`tasklist` 不给参数），直接不发现。
+/// 配置里的服务仍照常探活，功能不受影响。
+#[cfg(not(unix))]
+fn scan_llama_processes() -> Vec<LocalAiService> {
+    Vec::new()
+}
+
+/// 带缓存的进程扫描。轮询频繁，扫描本身是 fork 子进程，不能每轮都做。
+fn discovered_services() -> Vec<LocalAiService> {
+    static CACHE: OnceLock<Mutex<Option<(Instant, Vec<LocalAiService>)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    // 扫描失败最多让缓存空一轮，不值得把整个面板弄挂，所以中毒也继续用
+    let mut guard = match cache.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    if let Some((at, cached)) = guard.as_ref() {
+        if at.elapsed() < DISCOVERY_TTL {
+            return cached.clone();
+        }
+    }
+
+    let fresh = scan_llama_processes();
+    *guard = Some((Instant::now(), fresh.clone()));
+    fresh
+}
+
+
 
 // ---------------------------------------------------------------------------
 // 温度（smctemp 直读 SMC，免 sudo）
@@ -572,7 +731,29 @@ pub async fn status() -> Value {
         (exists, files)
     });
 
-    let results = probe_all(&services).await;
+    let mut results = probe_all(&services).await;
+    for item in results.iter_mut() {
+        item["source"] = json!("config");
+    }
+
+    // 自动发现：进程在跑、但配置里没写的 llama-server，直接补进清单。
+    // 配置是「默认假设」，本机事实以进程为准 —— 多起来的后端不该看不见。
+    let discovered = tauri::async_runtime::spawn_blocking(discovered_services)
+        .await
+        .unwrap_or_default();
+    let configured_ports: HashSet<u16> = services.iter().map(|service| service.port).collect();
+    let extras: Vec<LocalAiService> = discovered
+        .into_iter()
+        .filter(|service| !configured_ports.contains(&service.port))
+        .collect();
+    if !extras.is_empty() {
+        let mut auto = probe_all(&extras).await;
+        for item in auto.iter_mut() {
+            item["source"] = json!("auto");
+        }
+        results.extend(auto);
+    }
+
     let (temps, memory) = sys_task
         .await
         .unwrap_or_else(|_| (no_temps(), no_memory()));
@@ -672,10 +853,27 @@ pub async fn detect() -> Value {
         .iter()
         .any(|item| item["listening"] == json!(true));
 
+    // 进程扫描出来的后端：即使配置里没有，也算「本机部署过本地 AI」
+    let discovered: Vec<Value> = tauri::async_runtime::spawn_blocking(discovered_services)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|service| {
+            json!({
+                "port": service.port,
+                "name": service.name,
+                "desc": service.desc,
+                "inConfig": services.iter().any(|item| item.port == service.port),
+            })
+        })
+        .collect();
+    let has_discovered = !discovered.is_empty();
+
     json!({
-        // 有服务在听，或存在约定日志目录，都算「本机部署过本地 AI」
-        "deployed": any_listening || dir_exists,
+        // 有服务在听、扫到 llama-server 进程，或存在约定日志目录，都算「本机部署过本地 AI」
+        "deployed": any_listening || dir_exists || has_discovered,
         "ports": ports,
+        "discovered": discovered,
         "logDir": dir.to_string_lossy(),
         "logDirExists": dir_exists,
         "logFiles": log_files,
@@ -856,6 +1054,68 @@ mod tests {
             desc: String::new(),
             tcp_only,
         }
+    }
+
+    // --- 自动发现：命令行解析 ---
+
+    #[test]
+    fn parses_port_model_and_alias_from_llama_server_command() {
+        let cmd = "/Users/x/llama.cpp/build/bin/llama-server \
+                   --model /Users/x/models/qwen3-8b-q4.gguf --alias 文本 --port 8081 \
+                   --host 127.0.0.1 -c 8192";
+        let found = parse_llama_command(cmd).expect("应识别为 llama-server");
+
+        assert_eq!(found.port, 8081);
+        assert_eq!(found.key, "auto-8081");
+        assert_eq!(found.name, "文本", "有 --alias 时优先用别名");
+        assert_eq!(found.desc, "qwen3-8b-q4.gguf", "模型只留文件名");
+        assert!(!found.tcp_only, "扫出来的进程正在跑，可以正常 HTTP 探活");
+    }
+
+    #[test]
+    fn parses_equals_form_and_short_flags() {
+        let cmd = "llama-server -m /opt/m/vision.gguf --port=18080";
+        let found = parse_llama_command(cmd).expect("应识别");
+        assert_eq!(found.port, 18080);
+        assert_eq!(found.name, "llama.cpp 后端", "没有别名时用通用名");
+        assert_eq!(found.desc, "vision.gguf");
+    }
+
+    #[test]
+    fn ignores_non_llama_processes_and_missing_port() {
+        assert!(parse_llama_command("/usr/bin/python gateway.py --port 8080").is_none());
+        // 端口只写在参数值里、不是 --port，不该被当成服务
+        assert!(parse_llama_command("llama-server --alias llama-server-2 -m x.gguf").is_none());
+        // 命令行里出现 "llama-server" 字样但可执行文件不是它
+        assert!(parse_llama_command("/bin/sh -c 'echo llama-server'").is_none());
+    }
+
+    #[test]
+    fn skips_servers_bound_to_non_loopback_addresses() {
+        let cmd = "llama-server -m x.gguf --port 9000 --host 192.168.1.10";
+        assert!(parse_llama_command(cmd).is_none(), "对外暴露的不纳入本机监控");
+
+        let lan = "llama-server -m x.gguf --port 9000 --host 0.0.0.0";
+        assert!(parse_llama_command(lan).is_some(), "0.0.0.0 含 loopback，仍算本机");
+    }
+
+    #[test]
+    fn same_port_appears_once_even_with_wrapper_processes() {
+        // ps 里包装进程与真正的 server 各一行时，只留一条
+        let mut seen = HashSet::new();
+        let mut found = Vec::new();
+        for line in [
+            "sh -c exec llama-server -m a.gguf --port 8081",
+            "/opt/llama.cpp/llama-server -m /opt/a.gguf --port 8081",
+        ] {
+            if let Some(service) = parse_llama_command(line) {
+                if seen.insert(service.port) {
+                    found.push(service);
+                }
+            }
+        }
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].port, 8081);
     }
 
     /// 借一个端口号，随即释放，保证探测时该端口确实没人监听。

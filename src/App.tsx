@@ -12,6 +12,7 @@ import type {
   CurrentIdentity,
   LogRecord,
   PendingAccount,
+  PendingTask,
   StorePaths,
   SwitchPreflight,
   SysMetrics,
@@ -23,6 +24,30 @@ import FerryPanel from "./components/FerryPanel";
 import LocalAiPanel from "./components/LocalAiPanel";
 import WbaiPanel from "./components/WbaiPanel";
 import SwitchDialog from "./components/SwitchDialog";
+
+/**
+ * 这条任务能不能被自动代做（决定是否显示「去体验」）。
+ *
+ * 与后端 `growth::expert_id_from_url` 同口径。任务是两种链接形态：
+ *   1. 直接 deeplink：`workbuddy://experts?expertId=ex_xxx`
+ *   2. 站内中转页：`https://www.workbuddy.cn/work/launch/?deeplink=workbuddy%3A%2F%2Fexperts%3FexpertId%3Dex_xxx`
+ * 两种都先取出真正的 workbuddy 链接，再看有没有 `expertId`。解不出 id 的任务
+ * （资料库、发现应用、召唤 N 次、轻量云专家等）一律不给「去体验」，免得点了只跳转。
+ */
+function canAuto(task: PendingTask): boolean {
+  const url = task.jumpUrl ?? "";
+  let target = url;
+  const wrapped = /[?&]deeplink=([^&]+)/.exec(url);
+  if (wrapped) {
+    try {
+      target = decodeURIComponent(wrapped[1]);
+    } catch {
+      target = wrapped[1];
+    }
+  }
+  if (!target.startsWith("workbuddy://")) return false;
+  return /[?&]expertId=[A-Za-z0-9_]+/.test(target);
+}
 
 function dateKey(date: Date): string {
   const month = `${date.getMonth() + 1}`.padStart(2, "0");
@@ -114,7 +139,7 @@ export default function App() {
   const [progress, setProgress] = useState<{ index: number; total: number } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [banner, setBanner] = useState<{ kind: "ok" | "danger"; text: string } | null>(null);
+  const [banner, setBanner] = useState<{ kind: "ok" | "warn" | "danger"; text: string } | null>(null);
 
   // 积分：按账号 id 缓存查询结果；未查询过的账号没有条目
   const [credits, setCredits] = useState<Record<string, CreditItem>>({});
@@ -132,8 +157,8 @@ export default function App() {
   const [pendingLoading, setPendingLoading] = useState(false);
   /** 防并发：窗口聚焦与签到回调可能在拉取途中再次触发。 */
   const pendingInflight = useRef(false);
-  /** 待体验面板当前看的是哪个账号。null = 用清单里第一个有任务的账号。 */
-  const [pendingTab, setPendingTab] = useState<string | null>(null);
+  /** 正在自动执行的任务 code。同一时刻只允许跑一个 —— 界面自动化会抢前台。 */
+  const [autoTask, setAutoTask] = useState<string | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
@@ -202,14 +227,78 @@ export default function App() {
   }, []);
 
   /**
-   * 待体验面板只显示一个账号：顶部一排账号胶囊切换，避免两个号的清单连成一片。
-   * 没选过（或选中的账号已无待办）时落到第一个有任务的账号。
+   * 「去体验」：能自动做的直接做，做不了的退回打开链接。
+   *
+   * 判断交给后端 —— 任务链接有直接 deeplink 与站内中转页两种形态，在前端再写一遍
+   * 解析必然走偏。后端解不出专家 id 时返回 `skipped`，这里就退回打开链接。
+   * 辅助功能没就绪时连试都不试，直接打开。
+   *
+   * 成功的口径只有一个：后端回查到的 `completed`。自动化跑完但服务端进度没动，
+   * 就得如实说没完成 —— 之前报「已自动完成」全是假的。
    */
-  const pendingKeyOf = (item: PendingAccount) => item.id ?? item.label;
+  const runExperience = async (task: PendingTask, account: string | null) => {
+    const openOnly = () =>
+      void api.openLink(task.jumpUrl).catch((error) => showError(String(error)));
+
+    // `ax` 是挂载时的快照：WorkBuddy 后启动、或授权刚生效时它会一直停在 0，
+    // 于是「去体验」永远只跳转，而后端其实早已能读到窗口。点击时实时探一次。
+    let live = ax;
+    try {
+      live = await api.axStatus();
+      setAx(live);
+    } catch {
+      // 查不到状态就退回快照，不阻塞主流程
+    }
+    if (!(live && live.windows > 0)) {
+      openOnly();
+      return;
+    }
+
+    setAutoTask(task.code);
+    try {
+      const result = await api.axRunExpert(task.jumpUrl, task.title, task.code, account);
+      if (result.skipped) {
+        openOnly();
+        // 跳过是有原因的（账号对不上、链接里没专家 id），别默默只开个链接
+        const why = result.note ?? result.reason;
+        if (why) setBanner({ kind: "warn", text: why });
+        return;
+      }
+      const steps = (result.steps ?? []).join(" → ");
+      if (result.completed) {
+        setBanner({ kind: "ok", text: `已自动完成「${task.title}」${steps ? `：${steps}` : ""}` });
+      } else if (result.note) {
+        setBanner({ kind: "warn", text: result.note });
+      } else {
+        const progress = result.progress;
+        const now = progress?.found ? `服务端进度仍是 ${progress.current}/${progress.target}` : "服务端没有返回该任务";
+        setBanner({
+          kind: "warn",
+          text: `「${task.title}」对话已发出，但${now}（等了 ${result.waited ?? 0} 秒）。常见原因：这条要求直接在人机界面里完成，自动代做不算数；或客户端当前登录的不是这个账号（进度记到另一个号上了）。`,
+        });
+      }
+      // 进度也许还要几秒才落库，再拉一次清单；成了的自然从待办里消失。
+      window.setTimeout(() => void loadPending(true), 2500);
+    } catch (error) {
+      setBanner({ kind: "danger", text: String(error) });
+    } finally {
+      setAutoTask(null);
+    }
+  };
+
+  /**
+   * 待体验只跟「当前扣 token 的账号」走：`billingUid`（真正扣积分的号）优先，
+   * 没有就用 `loginUid`（客户端登录号）。两者都拿不到才退回第一个有任务的号。
+   * 不再并排显示多个账号 —— 别号的任务本来也只能在客户端切过去之后才做得了。
+   */
   const pendingAccounts = pending.filter((item) => item.tasks.length > 0);
+  const tokenUid = identity?.billingUid ?? identity?.loginUid ?? null;
   const activePending =
-    pendingAccounts.find((item) => pendingKeyOf(item) === pendingTab) ?? pendingAccounts[0] ?? null;
-  const activePendingKey = activePending ? pendingKeyOf(activePending) : null;
+    (tokenUid
+      ? pending.find((item) => (item.id ?? "").replace(/^uid:/, "") === tokenUid)
+      : null) ??
+    pendingAccounts[0] ??
+    null;
   const pendingRewardTotal = (item: PendingAccount) =>
     item.tasks.reduce((sum, task) => sum + (task.reward || 0), 0);
 
@@ -677,7 +766,7 @@ export default function App() {
 
       <div className="content">
         {banner && (
-          <div className={`banner${banner.kind === "danger" ? " danger" : ""}`}>
+          <div className={`banner${banner.kind === "ok" ? "" : ` ${banner.kind}`}`}>
             <span>{banner.text}</span>
           </div>
         )}
@@ -809,8 +898,12 @@ export default function App() {
               <h2>待体验</h2>
               <div className="head-tools">
                 {activePending && (
-                  <span className="head-meta">
-                    {activePending.tasks.length} 项 · +{pendingRewardTotal(activePending)} 积分
+                  <span
+                    className="head-meta"
+                    title={`只显示当前扣 token 的账号：${activePending.label}`}
+                  >
+                    {activePending.label} · {activePending.tasks.length} 项 · +
+                    {pendingRewardTotal(activePending)} 积分
                   </span>
                 )}
                 <button
@@ -825,27 +918,7 @@ export default function App() {
               </div>
             </div>
             <div className="panel task-panel">
-              {pendingAccounts.length > 1 && (
-                <div className="task-tabs" role="tablist">
-                  {pendingAccounts.map((item) => {
-                    const key = item.id ?? item.label;
-                    return (
-                      <button
-                        key={key}
-                        role="tab"
-                        aria-selected={activePendingKey === key}
-                        className={`task-tab${activePendingKey === key ? " active" : ""}`}
-                        onClick={() => setPendingTab(key)}
-                      >
-                        {item.label}
-                        <span className="task-tab-count">{item.tasks.length}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-
-              {activePending ? (
+              {activePending && activePending.tasks.length > 0 ? (
                 <div className="task-list">
                   {activePending.tasks.map((task) => (
                     <div className="task-row" key={task.code}>
@@ -865,15 +938,27 @@ export default function App() {
                         )}
                       </div>
                       <span className="task-reward">+{task.reward}</span>
-                      <button
-                        className="btn sm"
-                        disabled={!task.jumpUrl}
-                        onClick={() =>
-                          api.openLink(task.jumpUrl).catch((error) => showError(String(error)))
-                        }
-                      >
-                        去体验
-                      </button>
+                      {canAuto(task) ? (
+                        <button
+                          className="btn sm"
+                          disabled={autoTask !== null}
+                          title={
+                            ax && ax.windows > 0
+                              ? "在客户端里召唤专家、发一句话，并等服务端确认进度 —— 抢前台 1~2 分钟"
+                              : "辅助功能未就绪，点一下会先带你去授权"
+                          }
+                          onClick={() => void runExperience(task, activePending.id)}
+                        >
+                          {autoTask === task.code ? "执行中…" : "去体验"}
+                        </button>
+                      ) : (
+                        <span
+                          className="btn sm ghost is-manual"
+                          title="这类任务只能自己在客户端里完成，自动化代做不算数"
+                        >
+                          手动
+                        </span>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -882,8 +967,10 @@ export default function App() {
               )}
 
               <div className="task-foot">
-                这些任务要在客户端里真用一次才算完成（召唤专家对话、读文档…），接口代不了。
-                点「去体验」直接跳到对应页面，做完后下一轮签到会自动把奖励领掉。
+                只有「体验某位专家」这类能直接定位到专家的任务才显示「去体验」，点它会完整跑一遍：
+                打开专家页 → 召唤 → 发一句话 → 等回复 → 回查服务端进度。算不算完成按服务端说了算，
+                回来会告诉你实际结果。执行时会把客户端拉到前台、占用鼠标 1~2 分钟。
+                关注公众号、授权连接器、召唤 N 次这类没法定位到单一专家的任务标为「手动」，只能自己做。
               </div>
             </div>
           </>
@@ -1020,7 +1107,8 @@ export default function App() {
               <div className="row-label">顺手处理成长中心</div>
               <div className="row-hint">
                 自动签到之后，为该账号领取旅行奖励并再次出发、接取未报名的任务、领取可领的
-                任务奖励；没做完的体验任务会列在上方「待体验」里，点一下就能跳过去。
+                任务奖励；没做完的体验任务会列在上方「待体验」里，「召唤专家」类的点一下就自动完成，
+                其余跳到对应页面。
                 只做这些，「盲盒」不在此范围内 —— 抽奖次数有限，留给你自己在「今日全领」里点。
               </div>
             </div>
@@ -1039,7 +1127,7 @@ export default function App() {
                 「召唤专家」这类体验任务只有在客户端界面里真的说上一句才算数，接口代不了。
                 {isWindows
                   ? "Windows 上直接用系统自带的 UI Automation，不需要额外授权，只要客户端开着窗口就能用。"
-                  : "授权「辅助功能」之后，程序可以替你打开专家页并发送一句话。"}
+                  : "授权「辅助功能」之后，在「待体验」里点「去体验」就会替你打开专家页并发送一句话。"}
                 <br />
                 当前：
                 {ax === null

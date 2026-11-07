@@ -634,6 +634,12 @@ select {
   color: var(--danger);
 }
 
+/* 「做完了但服务端没认账」这类：不是报错，也不能算成功。 */
+.banner.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
 .spin {
   width: 12px;
   height: 12px;
@@ -2650,6 +2656,16 @@ body {
 
 .task-row .btn {
   min-width: 56px;
+}
+
+/* 自动化做不了的任务：不给「去体验」，用同样的按钮盒子显示一个灰掉的「手动」，
+   保持行高对齐，又不会误导用户以为点一下就能自动完成。 */
+.btn.is-manual {
+  justify-content: center;
+  cursor: default;
+  pointer-events: none;
+  opacity: 0.65;
+  font-weight: 400;
 }
 
 .task-foot {

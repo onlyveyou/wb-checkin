@@ -326,6 +326,12 @@ export interface LocalAiServiceStatus {
   state: LocalAiState;
   model: string | null;
   tasks: LocalAiTask[];
+  /**
+   * 这条从哪来：
+   * - `config` 配置里声明的（含按需网关这类扫不到的）
+   * - `auto` 从本机 llama-server 进程扫出来的，配置里没有
+   */
+  source?: "config" | "auto";
 }
 
 /** CPU / GPU 温度。读不到时为 null。 */
@@ -374,6 +380,8 @@ export interface LocalAiStatus {
 export interface LocalAiDetect {
   deployed: boolean;
   ports: { key: string; port: number; name: string; tcpOnly: boolean; listening: boolean }[];
+  /** 从 llama-server 进程扫出来的后端。`inConfig` 为假说明配置里没写。 */
+  discovered: { port: number; name: string; desc: string; inConfig: boolean }[];
   logDir: string;
   logDirExists: boolean;
   logFiles: number;

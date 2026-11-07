@@ -769,6 +769,40 @@ fn find_all(
     }
 }
 
+/// 当前界面上命中这个关键词的节点个数（最多算到 40）。
+///
+/// 用来判断「弹层收掉了没有」：客户端里留着上一次打开的专家页时，树里会有两个
+/// 「召唤」，这时候按下去很可能召唤到错的那位。
+fn count_hits(needle: &str) -> usize {
+    let Some(app) = open_client() else {
+        return 0;
+    };
+    let mut found = Vec::new();
+    find_all(app.0, "", needle, 0, &mut found);
+    found.len()
+}
+
+/// 客户端当前登录账号的脱敏昵称（形如 `183****7873`）。
+///
+/// WB-Checkin 可以同时挂多个账号，但界面自动化只能操作客户端**当前登录的那一个**。
+/// 账号对不上时照样能召唤、能发出消息，只是进度记到另一个号头上，任务永远不消失。
+/// 所以动手之前先比一次，不一致直接告诉用户，别白跑一遍。
+pub fn client_account() -> Option<String> {
+    let app = open_client()?;
+    let node = find_first(app.0, "AXPopUpButton", "*", 0)?;
+    let info = describe(node.0);
+    let text = if info.title.trim().is_empty() {
+        info.value
+    } else {
+        info.title
+    };
+    let label = text.split_whitespace().next().unwrap_or("").trim().to_string();
+    if label.is_empty() || !label.contains('*') {
+        return None;
+    }
+    Some(label)
+}
+
 /// 把文本塞进剪贴板再按 Cmd+V。webview 的输入框不认 `AXValue` 写入，
 /// 而逐字符合成键盘事件又会丢掉中文，粘贴是唯一稳的路子。
 fn paste_text(text: &str) -> bool {
@@ -827,6 +861,11 @@ fn append_log(text: &str) {
         let stamp = chrono::Local::now().format("%H:%M:%S");
         let _ = writeln!(file, "[{stamp}] {text}");
     }
+}
+
+/// 给别的模块写一行日志用（界面按钮走的那条路也要留痕，出问题才有得查）。
+pub fn note(text: &str) {
+    append_log(text);
 }
 
 /// 后台每 0.7 秒看一眼 `ax-cmd.txt`。文件里写 `key=value` 若干行，
@@ -1107,19 +1146,6 @@ fn open_url(url: &str) -> Result<(), String> {
         .map_err(|error| format!("打开链接失败：{error}"))
 }
 
-/// 主窗口的 frame，兜底定位用。
-fn main_window_frame() -> Option<(i64, i64, i64, i64)> {
-    let app = open_client()?;
-    let wins = copy_attr(app.0, "AXWindows")?;
-    unsafe {
-        if CFGetTypeID(wins.0) != CFArrayGetTypeID() || CFArrayGetCount(wins.0) == 0 {
-            return None;
-        }
-        let win = CFArrayGetValueAtIndex(wins.0, 0) as AXUIElementRef;
-        box_of(win)
-    }
-}
-
 /// 输入框卡片的位置。
 ///
 /// web 内容里输入框和发送按钮都不暴露（卡片那层的 `AXChildren` 是空的），
@@ -1132,9 +1158,23 @@ fn composer_frame(element: AXUIElementRef, depth: usize, best: &mut Option<(i64,
         let plausible = x > 400 && (600..=1500).contains(&w) && (80..=240).contains(&h) && y > 200;
         if plausible {
             let area = w * h;
-            // 取**最小**的那层：输入框卡片外面还套了一层（含「选择工作空间」那行），
-            // 用外层算内边距会点到卡片下面的空白处。
-            let better = best.map(|(_, _, bw, bh)| area < bw * bh).unwrap_or(true);
+            // 优先取**最靠下**的那层：召唤出来的会话页里，专家推荐问题卡片也满足上面的
+            // 尺寸判据，按「面积最小」会选到卡片，于是点「输入框」点进推荐问题，
+            // 正文被粘到别处、直接发出去一条预设问题（实测发错内容就是这么来的）。
+            // 输入框永远贴着窗口底部，用纵坐标排序最稳。同一层里再取面积小的
+            // （外层容器含「选择工作空间」那行，点它会落在卡片外面的空白）。
+            let better = match *best {
+                None => true,
+                Some((_, by, bw, bh)) => {
+                    if y > by + 12 {
+                        true
+                    } else if by > y + 12 {
+                        false
+                    } else {
+                        area < bw * bh
+                    }
+                }
+            };
             if better {
                 *best = Some((x, y, w, h));
             }
@@ -1142,6 +1182,26 @@ fn composer_frame(element: AXUIElementRef, depth: usize, best: &mut Option<(i64,
     }
     for child in children(element) {
         composer_frame(child.0, depth + 1, best);
+    }
+}
+
+/// 收集界面上所有「召唤」按钮的中心点，按纵坐标从小到大排。
+///
+/// 专家广场每张卡片都带一个「召唤」，专家弹层里也有一个。树里先命中哪个全看渲染
+/// 顺序 —— 实测就是因此召唤到了「嵌入式单片机老工程师」（要的是「直播电商教练」）。
+/// 弹层浮在最上层，它的按钮 y 最小，按纵向取第一个最接近「弹层里的那个」。
+fn summons(element: AXUIElementRef, depth: usize, out: &mut Vec<(i64, i64)>) {
+    if depth > 18 || out.len() >= 40 {
+        return;
+    }
+    let node = describe(element);
+    if node.role.eq_ignore_ascii_case("AXButton") && matches(&node, "召唤") {
+        if let Some((x, y, w, h)) = box_of(element) {
+            out.push((x + w / 2, y + h / 2));
+        }
+    }
+    for child in children(element) {
+        summons(child.0, depth + 1, out);
     }
 }
 
@@ -1189,35 +1249,124 @@ fn sidebar_has(prefix: &str) -> bool {
     hit
 }
 
-/// 点发送按钮。
+/// 输入框卡片此刻的 frame。召唤之后卡片位置会变，每次都要重新取。
+fn composer_now() -> Option<(i64, i64, i64, i64)> {
+    let app = open_client()?;
+    let mut frame = None;
+    composer_frame(app.0, 0, &mut frame);
+    frame
+}
+
+/// 把光标点进输入框（卡片正中）。
 ///
-/// 按钮是纯图标（没有文案、也不在树里），先按名字碰运气，认不到就按输入框卡片推算：
-/// 实测（卡片 936x134）发送键在卡片右下角内缩 30px 处。
-fn click_send() -> bool {
-    for pid in [renderer_pid(), client_pid()].into_iter().flatten() {
-        let Some(app) = open_client_at(pid) else {
-            continue;
-        };
-        for needle in ["发送", "提交", "send", "Send"] {
-            if let Some(target) = find_first(app.0, "AXButton", needle, 0) {
-                if click_element(target.0) {
-                    return true;
+/// 输入框本身不在可访问性树里 —— `AXWebArea` 下面只剩侧边栏那一堆，正文区是空壳。
+/// 想写字只能先点在卡片上；实测点卡片正中一定落在文本区。
+fn focus_composer() -> bool {
+    match composer_now() {
+        Some((x, y, w, h)) => click_at((x + w / 2) as f64, (y + h / 2) as f64),
+        None => false,
+    }
+}
+
+/// 发送按钮的候选位置（相对输入框卡片右下角的内缩量）。
+///
+/// 按钮是纯图标，既没文案也不在树里，只能点坐标。三套内缩量覆盖两种布局：
+/// 新任务页卡片高 184、会话页更矮，右下角留白不一样。**一次只试一个**，
+/// 三个点一起点会顺带按到旁边的控件。
+const SEND_INSETS: [(i64, i64); 3] = [(26, 24), (26, 60), (44, 30)];
+
+fn click_send_button(round: usize) -> bool {
+    let Some((x, y, w, h)) = composer_now() else {
+        return false;
+    };
+    let (dx, dy) = SEND_INSETS[round % SEND_INSETS.len()];
+    click_at((x + w - dx) as f64, (y + h - dy) as f64)
+}
+
+/// 写正文 + 发送，并等到界面能证明「真的发出去了」。
+///
+/// 发送优先用回车：客户端自己的提示写的是「Enter 发送 · Shift+Enter 换行」
+/// （`app.asar` 里的 i18n 原文），比按坐标点图标稳。回车的判定交给侧边栏 ——
+/// 发出第一条消息后左侧会多一条以提问开头的会话，这是最硬的证据；退一步看
+/// 输入框有没有从页面中间挪到底部。
+///
+/// `model` 在**正文写完、回车之前**切。`workbuddy://switch-model` 切的是「当前活动
+/// 会话」，刚召唤出来的会话在写入正文之前还没拿到焦点，这时候切往往切到上一个会话
+/// （实测发送后模型名仍是 DeepSeek）。写完正文焦点已经在这个会话里，才是切的时机。
+fn submit(prompt: &str, steps: &mut Vec<String>, model: &str) -> Result<(), String> {
+    let prefix: String = prompt.trim().chars().take(6).collect();
+    let mut baseline = client_composer_y();
+
+    for attempt in 0..3 {
+        if attempt > 0 {
+            steps.push(format!("第 {} 次补发", attempt + 1));
+            activate_client();
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            baseline = client_composer_y();
+        }
+
+        // 第一次**不点输入框**：召唤成功后客户端已经把光标放进新会话的输入框，
+        // 再点一下反而会落到「专家帮你做」的推荐问题卡片上 —— 客户端点卡片即发送，
+        // 于是发出去的是预设问题（实测「写3个爆款短视频脚本」），我们写的正文被丢掉。
+        // 补发时才点（那时页面已经稳定，卡片通常也收了）。
+        if attempt > 0 {
+            focus_composer();
+            std::thread::sleep(std::time::Duration::from_millis(220));
+        }
+        send_key("cmd+a");
+        std::thread::sleep(std::time::Duration::from_millis(160));
+        if attempt == 0 {
+            if !paste_text(prompt) {
+                return Err("写入正文失败".to_string());
+            }
+            steps.push("已写入正文".to_string());
+            std::thread::sleep(std::time::Duration::from_millis(600));
+
+            // 正文已进输入框 = 焦点在这个会话上，此刻切模型才切得中。
+            if !model.trim().is_empty() {
+                switch_model(model)?;
+                steps.push(format!("切模型 → {model}"));
+                std::thread::sleep(std::time::Duration::from_millis(1400));
+                // 切模型会重绘页面，草稿可能被冲掉，补写一遍。**不能再点一次输入框**：
+                // 重绘后推荐问题卡片的坐标变了，那一下会点到卡片上，客户端直接把
+                // 预设问题发出去（实测发出去的是「设计直播间话术和互动节奏」而不是
+                // 我们写的那句）。只补写，不重新定位。
+                send_key("cmd+a");
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                if !paste_text(prompt) {
+                    append_log("[expert] 切模型后补写正文失败");
                 }
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        }
+
+        let pressed = if attempt == 0 {
+            send_key("enter")
+        } else {
+            // 回车与按钮都试：回车失效通常是焦点问题，按钮失效通常是坐标问题
+            send_key("enter") | click_send_button(attempt)
+        };
+        append_log(&format!("[expert] 第 {} 次发送 pressed={pressed}", attempt + 1));
+        if !pressed {
+            continue;
+        }
+
+        for _ in 0..12 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if sidebar_has(&prefix) {
+                steps.push("已发送（侧边栏已建会话）".to_string());
+                return Ok(());
+            }
+        }
+        if let (Some(old), Some(new)) = (baseline, client_composer_y()) {
+            if (new - old).abs() > 150 {
+                steps.push("已发送（输入框已移到底部）".to_string());
+                return Ok(());
             }
         }
     }
-    let Some(app) = open_client() else {
-        return false;
-    };
-    let mut frame = None;
-    composer_frame(app.0, 0, &mut frame);
-    match frame {
-        Some((x, y, w, h)) => click_at((x + w - 30) as f64, (y + h - 30) as f64),
-        None => match main_window_frame() {
-            Some((x, y, w, h)) => click_at(x as f64 + w as f64 - 370.0, y as f64 + h as f64 / 2.0),
-            None => false,
-        },
-    }
+
+    Err("按回车、点按钮都没能发出去，输入框可能没拿到焦点".to_string())
 }
 
 /// 跑一个「体验专家」任务。
@@ -1242,80 +1391,89 @@ pub fn run_expert(expert_id: &str, prompt: &str) -> Result<Value, String> {
         ));
     }
 
-    if !model.is_empty() {
-        switch_model(&model)?;
-        steps.push(format!("切模型 → {model}"));
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+    // 客户端里常留着上一次打开的专家弹层（可能是用户自己点开的）。树里就会出现
+    // 两个「召唤」，`find_first` 按树的顺序取第一个，结果召唤到错的那位专家。
+    // 先按两次 Esc 把残留弹层收掉，再看还剩几个。
+    for _ in 0..2 {
+        send_key("escape");
+        std::thread::sleep(std::time::Duration::from_millis(350));
+    }
+    let leftover = count_hits("召唤");
+    append_log(&format!("[expert] 清弹层后「召唤」还有 {leftover} 个"));
+    if leftover > 0 {
+        steps.push(format!("有 {leftover} 个残留弹层收不掉"));
     }
 
     open_url(&format!("workbuddy://experts?expertId={expert_id}"))?;
+    append_log(&format!("[expert] 已打开专家页 {expert_id}"));
 
-    // 专家详情是个弹层，打开需要时间，网络慢的时候两三秒还不够 —— 轮询等它出现。
-    let mut summoned = false;
-    for _ in 0..14 {
-        std::thread::sleep(std::time::Duration::from_millis(700));
+    // 专家详情是个弹层，打开需要时间。**先确认弹层真的开了**（弹层底部印着
+    // `ID: ex_xxx`，拿目标 id 当锚点），再按召唤 —— 早按会按到专家广场卡片上
+    // 那个「召唤」，召唤出完全不相关的专家（实测要直播教练、来了个单片机工程师）。
+    let mut opened = false;
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(600));
         let Some(app) = open_client() else {
             continue;
         };
-        match find_first(app.0, "", "召唤", 0) {
-            Some(target) => {
-                summoned = press(target.0);
-                if summoned {
-                    break;
-                }
-            }
-            None => continue,
+        if find_first(app.0, "", expert_id, 0).is_some() {
+            opened = true;
+            break;
         }
     }
+    append_log(&format!("[expert] 专家弹层就绪 = {opened}"));
+    if !opened {
+        return Err(format!("专家详情没打开（找不到 {expert_id}），这次不做"));
+    }
+
+    let mut summoned = false;
+    for round in 0..6 {
+        let Some(app) = open_client() else {
+            continue;
+        };
+        let mut points = Vec::new();
+        summons(app.0, 0, &mut points);
+        points.sort_by_key(|(_, y)| *y);
+        let Some((x, y)) = points.first().copied() else {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            continue;
+        };
+        summoned = click_at(x as f64, y as f64);
+        append_log(&format!(
+            "[expert] 第 {} 轮按召唤 @({x},{y})，候选 {} 个 = {summoned}",
+            round + 1,
+            points.len()
+        ));
+        if summoned {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(600));
+    }
     if !summoned {
+        append_log("[expert] 失败：没找到「召唤」");
         return Err("没找到「召唤」，专家详情可能没打开".to_string());
     }
     steps.push("已召唤".to_string());
-    std::thread::sleep(std::time::Duration::from_millis(2600));
-
-    if !prompt.trim().is_empty() {
-        // 召唤出来的新任务页会预填一段示例提问，先全选再粘贴，否则会接在示例后面。
-        send_key("cmd+a");
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        if !paste_text(prompt) {
-            return Err("写入正文失败".to_string());
-        }
-        steps.push("已写入正文".to_string());
-        std::thread::sleep(std::time::Duration::from_millis(900));
-    }
-
-    // 发送：点之前把客户端拉到前台（窗口没拿到焦点时首点会被吞），
-    // 点完看侧边栏有没有多出这条会话 —— 那才是真发出去了。
-    let prefix: String = prompt.trim().chars().take(6).collect();
-    let before = client_composer_y();
-    let mut sent = false;
-    for attempt in 0..3 {
-        if attempt > 0 {
-            steps.push(format!("第 {} 次补点", attempt + 1));
-            activate_client();
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
-        if !click_send() {
-            continue;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1800));
-        if sidebar_has(&prefix) {
-            sent = true;
+    // 召唤后客户端要新建一个会话页。等输入框卡片真的出现再去切模型 ——
+    // 转场过程中发 deeplink，客户端会把切换丢掉，新会话照样用默认模型。
+    let mut ready = false;
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if composer_now().is_some() {
+            ready = true;
             break;
         }
-        // 侧边栏可能还没刷新，退一步看输入框有没有从中间挪到底部。
-        if let (Some(old), Some(new)) = (before, client_composer_y()) {
-            if (new - old).abs() > 150 {
-                steps.push("会话已建（侧边栏未刷新）".to_string());
-                sent = true;
-                break;
-            }
-        }
     }
-    if !sent {
-        return Err("点了发送但界面没变化，可能被弹层挡住了".to_string());
+    append_log(&format!("[expert] 会话输入框就绪 = {ready}"));
+
+    // **必须等召唤之后才切模型**。模型是会话级的：召唤会新建一个会话，若在召唤前
+    // 切，切的是上一个会话，新会话照样用默认模型（实测截图里依旧是 DeepSeek）。
+    // 切模型放在 submit 里（正文写完、回车之前）—— 详见 submit 的注释。
+
+    if !prompt.trim().is_empty() {
+        submit(prompt, &mut steps, &model)?;
     }
-    steps.push("已发送".to_string());
+    append_log(&format!("[expert] 完成：{}", steps.join(" → ")));
     Ok(json!({ "model": model, "steps": steps }))
 }
 

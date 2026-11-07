@@ -568,6 +568,13 @@ body {
   color: #a02b26;
 }
 
+/* 「做完了但服务端没认账」这类：不是报错，也不能算成功。 */
+.banner.warn {
+  border-color: #efdcb6;
+  background: #fdf6e7;
+  color: #8a5a00;
+}
+
 /* ---------- 空状态 ---------- */
 
 .empty {

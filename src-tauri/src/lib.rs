@@ -760,6 +760,117 @@ fn ax_request_trust() -> Value {
     axdrive::request_trust()
 }
 
+/// 体验专家任务：完整走一遍「打开专家页 → 召唤 → 说一句话 → 等回复 → 回查进度」。
+///
+/// 专家 id 从任务的 `jump_url` 里取（可能是直接 deeplink，也可能是站内中转页里
+/// 二次编码的 `deeplink` 参数）。链接里没有 expertId 的任务 —— 关注公众号、
+/// 授权连接器、资料库 —— 返回 `skipped` 而不是报错：这不是失败，是「这个任务
+/// 得你自己去」，界面据此退回「只打开链接」。
+///
+/// 界面自动化只负责「让对话发生」。**任务算不算完成必须回头问服务端** ——
+/// 进度是从真实对话反推的，消息发出去不等于服务端认账。只报「已发送」就宣布
+/// 成功是错的（0.10.6 就是这么误报的），所以这里发完还要盯着 `task_state` 变。
+///
+/// 必须走阻塞线程：界面驱动那一串是固定 sleep 加元素轮询，放在异步执行器上
+/// 会把其它命令一起堵住。
+#[tauri::command]
+async fn ax_run_expert(
+    jump_url: String,
+    title: String,
+    code: String,
+    account: Option<String>,
+) -> Result<Value, String> {
+    let Some(expert) = growth::expert_id_from_url(&jump_url) else {
+        return Ok(json!({
+            "skipped": true,
+            "note": "这个任务的链接里没有专家 id（只到专家广场），自动做不了，自己去客户端里点一下",
+        }));
+    };
+
+    // 账号先对上，再动手。客户端只认自己当前登录的那个号：在别的号上召唤、发问，
+    // 进度记在别的号头上，这条任务永远不会消失 —— 之前「做了也没完成」就是这里。
+    // 传了 account 就只认它，**不要回落到第一个账号**（否则回查的又是别人的进度）。
+    let accounts = store::load_accounts();
+    let picked = account
+        .filter(|id| !id.is_empty())
+        .and_then(|id| {
+            accounts
+                .iter()
+                .find(|item| store::get_str(item, "id").as_deref() == Some(id.as_str()))
+                .cloned()
+        });
+    if let Some(picked) = &picked {
+        let want = display_name(picked);
+        if let Some(live) = axdrive::client_account() {
+            if want != live {
+                axdrive::note(&format!(
+                    "[button] 账号不一致：任务属于 {want}，客户端登录的是 {live}，不自动做"
+                ));
+                return Ok(json!({
+                    "skipped": true,
+                    "note": format!(
+                        "这条任务属于账号 {want}，但客户端现在登录的是 {live}。在客户端里切到 {want} 再做，否则进度记到另一个号上，任务不会消失。"
+                    ),
+                }));
+            }
+        }
+    }
+
+    let ask = expert_prompt(&title);
+    axdrive::note(&format!("[button] 点了「去体验」：{title} → {expert}"));
+    let outcome = tauri::async_runtime::spawn_blocking(move || axdrive::run_expert(&expert, &ask))
+        .await
+        .map_err(|error| format!("自动化线程异常退出：{error}"))?;
+    if let Err(error) = &outcome {
+        axdrive::note(&format!("[button] 自动化失败：{error}"));
+    }
+    let outcome = outcome?;
+
+    let Some(picked) = picked else {
+        return Ok(json!({
+            "skipped": false,
+            "model": outcome["model"],
+            "steps": outcome["steps"],
+            "completed": false,
+            "note": "本机没有账号，没法回查进度",
+        }));
+    };
+
+    // 助手回复要几十秒才结束，进度也是那时才动。每 5 秒问一次，最多等 100 秒。
+    let mut state = growth::task_state(&picked, &code).await;
+    let mut waited = 0u64;
+    while !state["done"].as_bool().unwrap_or(false) && waited < 100 {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        waited += 5;
+        state = growth::task_state(&picked, &code).await;
+    }
+
+    let mut result = outcome;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("skipped".to_string(), json!(false));
+        object.insert("completed".to_string(), json!(state["done"]));
+        object.insert("progress".to_string(), state);
+        object.insert("waited".to_string(), json!(waited));
+    }
+    Ok(result)
+}
+
+/// 任务标题 → 一句自然的提问。
+///
+/// 标题形如「体验「中国电商运营专家」」，去掉包装再问一句最省事；包装没去掉就
+/// 原样用，反正只要是一句真话，服务端不会因为措辞不认账。
+fn expert_prompt(title: &str) -> String {
+    let trimmed = title.trim();
+    let bare = trimmed
+        .strip_prefix("体验")
+        .unwrap_or(trimmed)
+        .trim()
+        .trim_matches(|c: char| matches!(c, '「' | '」' | '“' | '”' | '"' | '《' | '》' | '\''))
+        .trim();
+    let name = if bare.is_empty() { trimmed } else { bare };
+    format!("你好，{name}能帮我做哪些事？用一句话说明就行。")
+}
+
 // ---------------------------------------------------------------------------
 // 积分趋势
 //
@@ -1469,6 +1580,7 @@ pub fn run() {
             ax_probe,
             ax_open_settings,
             ax_request_trust,
+            ax_run_expert,
             usage_cached,
             fetch_usage_all,
             local_ai_status,

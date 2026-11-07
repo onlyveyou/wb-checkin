@@ -239,6 +239,31 @@ export const axProbe = () =>
 
 export const axRequestTrust = () => invoke<AxStatus>("ax_request_trust");
 
+/**
+ * 体验专家任务：完整跑一遍「打开专家页 → 召唤 → 说一句话 → 等回复 → 回查进度」。
+ *
+ * 链接里没有专家 id 的任务返回 `{ skipped: true }`，调用方据此退回「只打开链接」。
+ * `completed` 是**服务端的判定**，不是「消息发出去了」—— 两者经常不一致，
+ * 界面必须按 `completed` 说话。整个动作 10 秒起、最长约 2 分钟（等回复），
+ * 期间会抢前台、动鼠标。
+ */
+export const axRunExpert = (
+  jumpUrl: string,
+  title: string,
+  code: string,
+  account: string | null,
+) =>
+  invoke<{
+    skipped?: boolean;
+    reason?: string;
+    note?: string;
+    model?: string | null;
+    steps?: string[];
+    completed?: boolean;
+    waited?: number;
+    progress?: { found: boolean; current: number; target: number; done: boolean; status: string };
+  }>("ax_run_expert", { jumpUrl, title, code, account });
+
 // ---------------------------------------------------------------------------
 // 国际版摆渡
 //
