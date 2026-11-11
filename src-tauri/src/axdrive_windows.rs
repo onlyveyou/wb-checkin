@@ -636,6 +636,33 @@ pub fn dump_path() -> PathBuf {
     crate::paths::data_dir().join("ax-dump.txt")
 }
 
+/// 客户端左上角显示的账号名（形如 `183****7873`）。
+///
+/// WB-Checkin 可以同时挂多个账号，但界面自动化只能操作客户端**当前登录的那一个**。
+/// 账号对不上时照样能召唤、能发出消息，只是进度记到另一个号头上，任务永远不消失。
+/// 与 macOS 版同口径：只认带掩码星号的标签，读不到就返回 `None`，由调用方决定是否放行。
+pub fn client_account() -> Option<String> {
+    let (_, walker, root) = open_client().ok()?;
+    let (nodes, _) = flatten(&walker, &root, true);
+    nodes
+        .iter()
+        .filter(|node| !node.offscreen)
+        .find_map(|node| {
+            let label = node.name.split_whitespace().next().unwrap_or("").trim();
+            if label.contains("****") {
+                Some(label.to_string())
+            } else {
+                None
+            }
+        })
+}
+
+/// 写一行自动化日志。与 macOS 版共用同一个文件（`ax-log.txt`），
+/// 「点按钮跑挂了」在两端都能事后复盘。
+pub fn note(text: &str) {
+    append_log(text);
+}
+
 /// Windows 没有「辅助功能」授权页需要跳转。
 pub fn open_settings() -> Result<(), String> {
     Err("Windows 不需要单独授权界面自动化".to_string())
