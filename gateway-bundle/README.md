@@ -3,6 +3,9 @@
 一个 OpenAI 兼容端点，内部按质量分组把请求路由到 15 家上游的免费模型，
 遇到限流 / 5xx / 超时 / 空响应 / 鉴权失败时自动降级到下一个候选。
 
+除了填 key 的上游，网关还带**三个网页额度平台**（OrcaTerm / 豆包 / Antigravity），
+它们用的是账号自己在平台上的免费额度，走各自的登录方式，见[下文](#三个网页额度平台)。
+
 ```
 客户端 ──POST /v1/chat/completions──▶ 127.0.0.1:8901
                                         │
@@ -15,9 +18,8 @@
 ## 快速开始
 
 ```bash
-cd ~/.wb-checkin-gateway
-./toggle.sh status            # 状态 + 各候选冷却情况
-./toggle.sh on | off          # 手动开关
+# 状态：版本、当前分组、候选顺序、跳过原因、各平台登录态
+curl -s http://127.0.0.1:8901/health | python3 -m json.tool
 
 # 看每家上游的 key 是否就位
 curl -s http://127.0.0.1:8901/providers | python3 -m json.tool
@@ -32,6 +34,13 @@ curl -s http://127.0.0.1:8901/v1/chat/completions \
 ```
 
 端点：`http://127.0.0.1:8901/v1/chat/completions` · 密钥随意填（本机无鉴权）
+
+手动启动（常驻方式失效时的兜底）：
+
+```bash
+cd ~/.wb-checkin-gateway && ./run.sh        # macOS
+cd %USERPROFILE%\.wb-checkin-gateway && run.cmd   # Windows
+```
 
 ## 配置面板（填 key、加渠道、试连）
 
@@ -53,9 +62,12 @@ curl -s http://127.0.0.1:8901/v1/chat/completions \
 
 面板只监听 `127.0.0.1`，且拒绝非本机来源的跨站写请求。
 
-**和 WB-Checkin 的关系**：WB-Checkin 0.10.9 起自带「自定义模型」标签（`src/components/FreeHubPanel.tsx`），
-它通过 Tauri IPC → `src-tauri/src/freehub.rs` 读这个网关的 `/admin/api/*`，所以两个入口看到的是同一份
-`config.json`：应用里改完，浏览器面板刷新即可见；反之亦然。网关没起来时那个标签显示「网关未运行」并给一个启动按钮。
+**和 WB-Checkin 的关系**：WB-Checkin 0.11 起把整套网关打进 app，首次启动解包到这个目录并注册常驻
+（macOS 是 LaunchAgent，Windows 是 `run.cmd` + 按 `.gateway.pid` 杀进程）。app 里通过 Tauri IPC →
+`src-tauri/src/freehub.rs` 读 `/admin/api/*`，所以两个入口看到的是同一份 `config.json`：应用里改完，
+浏览器面板刷新即可见；反之亦然。app 里的四个标签页（自定义模型 / OrcaTerm / 豆包 / Antigravity）就是这个网关的界面。
+
+升级时 app 会逐文件比对脚本内容并重启常驻进程 —— `launchd` 只在进程退出时重读脚本，不重启就会一直跑旧路由。
 
 > 注：模型摆渡（OC Ferry）读的是 `sidecar/src/backend.js` 里写死的 `provider.id === 'opencode'`，
 > 与本网关无关——那边的模型来自 OpenCode Zen 池，这边是各家平台自己的 key，两条路互不影响。
@@ -110,6 +122,27 @@ launchctl kickstart -k gui/$(id -u)/ai.wbgateway.openrouter-free
 | `volc` | 400 `CodingPlan 订阅已过期`（账号 2124854726） | 续订后改回 |
 | `xai` | 403 `no credits or licenses`，且直连不通 | 充值 + 保留 proxy 后改回 |
 
+## 三个网页额度平台
+
+这三个不走「填 key」，走的是**账号在平台网页版的登录态**，消耗该账号的免费额度。模型名带平台前缀：
+`orcaterm/auto`、`doubao/deepseek-v4-1-flash`、`antigravity/auto` 这样。
+
+| 平台 | 实现 | 登录 | 上游 |
+|---|---|---|---|
+| OrcaTerm | `orcaterm_auth.mjs` | 独立 Chrome 扫码，取 `orcaterm` 域 cookie 与 uin | 平台自己的网关，模型 ID 必须带 `TokenHub/` 或 `Hunyuan3/` 前缀 |
+| 豆包 | `doubao_bridge.mjs` | 独立 Chrome 登录 doubao.com，取 cookie + 设备指纹 | `POST /chat/completion`，在页面上下文里 `fetch` 以拿到站点 JS 生成的签名 |
+| Antigravity | `antigravity.mjs` | OAuth PKCE + 本地回调，存 refresh_token | `v1internal:streamGenerateContent`，逐帧转成 OpenAI chunk |
+
+**豆包那层为什么绕。** 页面内请求靠站点自己的 JS 注入 `a_bogus` / `msToken`，所以必须在浏览器里发，不能纯 HTTP 重放。由此带来三件事：
+
+1. 浏览器必须**有头** —— 豆包按浏览器特征判定，`--headless` 一律回 `710022004`；启动后用 CDP（`Browser.setWindowBounds`）最小化，运行期还会检查窗口状态，被 restore 就压回去。
+2. 页面自己是活的：它通过 IM 长连接看到会话里有一条「有问无答」，会按 recovery 逻辑把同一条再发一遍，导致**一次提问扣两次额度**。所以桥接挂了 CDP `Fetch` 域只监听 `/chat/completion`，带 `is_recovery` 的请求直接 `failRequest`，我们那条 `continueRequest`。
+3. 上游帧的正文与思考要按**块归属**分：`block_type=10000` 的 `parent_id` 指向思考容器（`10040`）就算思考，否则算正文；顶层 `{"text": ...}` 增量跟随当前打开的块。早先用 `10040` 出现次数的奇偶来判，必然错位（容器会来 start/update/finish 好几次），结果是正文被截断、思考内容被当成答案发出去。
+
+**会话按客户端隔离。** 不是全局复用一条豆包会话：`config.doubao.sessions[指纹] = {id, at, count}`，指纹取首条用户消息，用消息总数判断是不是新会话（同一会话内只增不减，变少就是另开了）。否则新会话里问同一句，豆包会回「用户重复查询，此前已完成答复」。
+
+**限流与风控。** `710022002` / `710022004` / `710012001` 会标成 `accountWide`，整组冷却 30 分钟并在本轮跳过同 provider，避免反复触发。登录器与桥接的 stderr/stdout 都落到 `doubao-login.log` / `orcaterm-login.log`，排错先看这两个。
+
 ## 质量分组
 
 `tier.sh` 切换，改完自动重载并打印队列。
@@ -120,17 +153,17 @@ launchctl kickstart -k gui/$(id -u)/ai.wbgateway.openrouter-free
 | `standard` | 15 | 加上慢但可用的（gemini-4-hydrogen、glm-4.5-flash、step-5） |
 | `all` | 40 | 全部登记项，含已知超时/失效的，用来探测渠道恢复 |
 
-## 命令
+## 改配置后怎么重载
+
+改完 `config.json` 需要重启常驻进程才会生效（macOS 的 `launchd` 只在进程退出时重读脚本与配置）：
 
 ```bash
-cd ~/.wb-checkin-gateway
-./toggle.sh on|off|status     # 开关 + 状态
-./tier.sh high|standard|all   # 切分组（不带参数列出全部）
-node probe.mjs --tier all     # 全渠道探测（只测有 key 的）
-node probe.mjs --provider nvidia --gap 1700   # 单家探测，NVIDIA 要放宽间隔防 429
+launchctl kickstart -k gui/$(id -u)/ai.wbgateway.openrouter-free    # macOS
 ```
 
-`probe.mjs` 逐个发最小请求，报告 HTTP 码 / 耗时 / 内容或错误原因，末尾给可用数与失败清单。
+Windows 上由 app 按 `.gateway.pid` 走 `taskkill /PID` 再重拉，**不要用 `taskkill /IM node.exe`** —— 那会把你自己的 node 一起杀掉。
+
+改上游 key、加渠道、切分组、试连都建议直接走面板（`http://127.0.0.1:8901/admin` 或 app 里的「自定义模型」标签），改完就地重建队列，不中断请求。
 
 ## 接口
 
@@ -173,14 +206,30 @@ gemini-3.8-flash（503 高需求）、glm-4.6v-flash（429 访问量过大）
 
 ## 目录
 
+app 解包时只复制 `src-tauri/src/freehub.rs` 里 `BUNDLE_FILES` 列出的文件 —— **新增脚本必须同步改那个清单**，否则新机器上解包后没有这个文件。
+
 ```
-config.json      15 家上游 + 三个分组的全部配置（唯一配置入口）
-gateway.mjs      网关本体，零依赖，外发走 /usr/bin/curl
-probe.mjs        全渠道探测
-toggle.sh        开关
-tier.sh          分组切换
-run.sh           启动包装（自动找 node）
-gateway.log      运行日志
+config.json          15 家上游 + 三个分组 + 三个平台的配置（唯一配置入口）
+gateway.mjs          网关本体，零依赖
+doubao_bridge.mjs    豆包：CDP 驱动浏览器、拼请求、解析帧
+orcaterm_auth.mjs    OrcaTerm 扫码登录器
+antigravity.mjs      Antigravity OAuth 反代
+admin.html           配置面板（浏览器打开 /admin）
+run.sh               macOS 启动包装（自动找 node、探测可执行性）
+README.md            本文件
 ```
 
-`*.bak-single-provider` 是改造前的单上游版本，回滚用。
+运行时生成（不进仓库）：
+
+```
+node / node.exe      运行时（Windows 版由 CI 构建时下载）
+run.cmd              Windows 手动启动入口
+.gateway.pid         进程号，重启按它精确杀进程
+.bundle-version      app 写入的包版本，/health 的 version 取自它
+.inject-status.json  最近一次模型注入结果
+gateway.log          运行日志
+stdout.log stderr.log
+doubao-login.log     豆包登录器输出（排错先看这个）
+orcaterm-login.log
+.doubao-chrome-profile  .orcaterm-chrome-profile   独立浏览器 profile
+```

@@ -2,7 +2,9 @@
 
 WorkBuddy / CodeBuddy 多账号每日自动签到 —— macOS 与 Windows 桌面应用（Tauri v2 + React）。
 
-自己写的版本，只做四件事：**多账号管理 + 每日自动签到 + 积分查询与账号切换 + 本地 AI 监控（可选）**。另有一个可选的**模型摆渡**：把 OpenCode 的免费模型接进 WorkBuddy，见下。不做会话复制、Token 统计。
+自己写的版本，只做四件事：**多账号管理 + 每日自动签到 + 积分查询与账号切换 + 本地 AI 监控（可选）**。
+
+此外还有几组可选功能，都是把外部额度接进 WorkBuddy 的模型选择器：**模型摆渡**（OpenCode 免费模型）、**国际版摆渡**（WorkBuddy 国际版）、**三个网页额度渠道**（腾讯 OrcaTerm / 豆包 / Google Antigravity，走账号自己的免费额度）、**自定义模型**（自己填 key 的 15 家上游）。不做会话复制、Token 统计。
 
 <p align="center"><img src="docs/screenshots/01-accounts.png" width="860" alt="账号签到主界面：概览、账号列表、积分趋势"></p>
 
@@ -53,6 +55,7 @@ Windows 版与 macOS 版功能一致，差别只在系统集成：
 - **托盘**：Windows 的系统托盘只有 16×16 图标、没有文字区，所以硬盘 / CPU / 内存 / 网速改在**悬停气泡**和**右键菜单**里显示（macOS 是直接写在菜单栏上）。左键点图标弹面板，右键出菜单。
 - **界面自动化**：Windows 用系统自带的 UI Automation，不需要授权；只要客户端窗口开着就能用。
 - **客户端路径**：Windows 上官方的数据目录名无从预知，设置页的「自动探测」会把 `%APPDATA%` 各层扫到的登录态文件列出来点选，也可以直接手填（留空即自动探测）。
+- **内置网关**：Windows 上同样可用 —— `node.exe` 随安装包分发，进程由 app 自己拉起（不弹黑框），数据在 `%USERPROFILE%\.wb-checkin-gateway`。起不来时那个目录下的 `run.cmd` 可以双击手动启动。
 
 > **免责声明（下载、安装或使用即视为已阅读并同意全部条款）**
 >
@@ -74,6 +77,8 @@ Windows 版与 macOS 版功能一致，差别只在系统集成：
 
 <p align="center"><img src="docs/screenshots/03-local-ai.png" width="860" alt="本地 AI 监控面板"></p>
 
+主窗口顶部是标签栏：**账号签到 / 本地 AI / 模型摆渡 / 国际版摆渡 / 自定义模型 / OrcaTerm / 豆包 / Antigravity**。第一个日常用，后面七个都是把某种额度接进 WorkBuddy 的可选功能，默认关闭。
+
 完整操作步骤见 [使用说明.md](使用说明.md)。
 
 ## 功能
@@ -94,6 +99,10 @@ Windows 版与 macOS 版功能一致，差别只在系统集成：
 | **本地 AI 监控**（可选） | 查看本机 llama.cpp 推理后端与按需网关的实时状态、CPU / GPU 温度与运行日志。**默认关闭** —— 没部署本地 AI 的电脑保持关闭即可，关闭时不产生任何探测 |
 | **模型摆渡**（可选） | 把 OpenCode 的免费模型摆渡给 WorkBuddy：内置隔离运行时、并发检测、判定缓存、一键导入。**默认关闭**，不启动时不占任何端口。需要一个 Node.js 22+ 运行时 |
 | **国际版摆渡**（可选） | 把 **WorkBuddy AI 国际版**的免费模型（积分倍率 0）摆渡给国内版：官方授权登录、读客户端缓存里的模型与倍率、**逐模型**检测与导入。全部在本进程内用 Rust 实现，不起子进程、不需要 Node，所以 Windows 版同样可用。**默认关闭**，开关在「国际版摆渡」标签页 |
+| **自定义模型**（可选） | 内置网关按质量分组把请求路由到 15 家上游的免费模型，遇到限流 / 5xx / 超时 / 空响应自动降级到下一个候选。面板里填 key、加渠道、试连，改完即时生效。**默认关闭** |
+| **OrcaTerm**（可选） | 腾讯 OrcaTerm 的扫码登录额度：扫码取 cookie 后反代 `TokenHub/*` / `Hunyuan3/*` 那几个限时免费模型，`orcaterm/auto` 在可用模型间轮换；面板显示累计调用 / 失败 / 冷却 |
+| **豆包**（可选） | 豆包网页额度（doubao.com）：独立 Chrome 登录后，聊天走页面内 `fetch` 让站点 JS 注入签名，消耗的是账号自己的免费额度而不是方舟 API 额度。模型清单从官方接口动态拉取，含每日自动签到、额度与消耗、按会话隔离 |
+| **Antigravity**（可选） | 反代 Google Cloud Code Assist：用 Antigravity IDE 的 OAuth 登录，拿 refresh_token 换 access_token 直连，把 Gemini 风格 SSE 逐帧转成 OpenAI chunk。模型清单与额度都从官方接口取 |
 
 ## 三种添加账号方式的差别
 
@@ -109,7 +118,11 @@ Windows 版与 macOS 版功能一致，差别只在系统集成：
 
 相比同类工具，这里刻意做了几处收紧：
 
-1. **本地端口只有一个，且默认不开**。除「模型摆渡」外，前端只通过 Tauri IPC 调用命令，不存在本地 HTTP 服务。模型摆渡开启后会监听 `127.0.0.1:41980`：只绑回环、口令一次一发（`0600` 落盘）、任何带 `Origin` 的请求一律 403、请求体上限 8 MB、管理路由不对浏览器开放。这条口子是这个功能存在的前提，关掉功能就关掉端口 —— 不假装它不存在。
+1. **本地端口只有两个，且都默认不开**。除「模型摆渡」与「网页额度渠道」外，前端只通过 Tauri IPC 调用命令，不存在本地 HTTP 服务。两个端口都只绑 `127.0.0.1`：
+   - `41980`（模型摆渡）：口令一次一发（`0600` 落盘）、任何带 `Origin` 的请求一律 403、请求体上限 8 MB、管理路由不对浏览器开放。
+   - `8901`（内置网关）：**本机无鉴权**，密钥随意填 —— 这是为了能直接接 WorkBuddy 这类只认 `base_url + api_key` 的客户端。它反代的是各平台自己的账号额度，同机任何进程都能调；不需要这些渠道时把功能关掉，端口不会起。
+
+   这两条口子是对应功能存在的前提，不假装它们不存在。
 2. **凭证文件权限固定**。数据目录 `~/.wb-checkin` 为 `0700`，`accounts.json` / `config.json` / `checkin-logs.json` 均为 `0600`；临时文件在创建时即带 `0600`，避免 rename 之前出现可被读取的窗口。
 3. **域名白名单**。账号记录里的 `domain` 必须命中 `www.codebuddy.cn` / `www.workbuddy.cn`，否则回落到默认域名 —— 防止账号记录被篡改后把 Bearer token 发往攻击者主机。手动添加时直接拒绝白名单外的域名。
 4. **凭证不出后端**。前端拿到的账号视图不含 `access_token` / `refresh_token`，只有 `hasRefreshToken` 这类布尔量。
@@ -323,6 +336,49 @@ WorkBuddy → 127.0.0.1:41980 → 隔离的 opencode serve → OpenCode Zen 免�
 - **代理消失不会拖垮服务**。曾经开着「跟随系统代理」、之后 macOS 那边的代理被关掉（换了网络、退了客户端），启动时会自动降级为直连、把开关落成关、把原因写进 `opencode.log`，服务照常起来。反之，启动失败时死因会同时写进日志与 `status.json`，面板的报错里直接带出来，不会只剩一句「进程已退出」。
 - **地区限制换客户端也解不掉**：OpenCode 官方文档明确写着部分模型不对中国大陆等地区开放，这是按出口 IP 判定的策略。本工具如实归因、自动落到可用模型，不做身份伪造。
 
+## 网页额度渠道（可选）
+
+把三个平台的**网页版免费额度**接进 WorkBuddy 的模型选择器。入口是「自定义模型 / OrcaTerm / 豆包 / Antigravity」四个标签页，**全部默认关闭**。
+
+```
+WorkBuddy ──127.0.0.1:8901/v1──▶ 内置网关 ──┬─ OrcaTerm（cookie 反代）
+                                            ├─ 豆包（Chrome 页面内 fetch）
+                                            ├─ Antigravity（OAuth 反代）
+                                            └─ 15 家上游（自己填 key）
+```
+
+### 三个渠道的差别
+
+| 渠道 | 认证方式 | 模型从哪来 | 消耗的是什么 |
+| --- | --- | --- | --- |
+| **OrcaTerm** | 独立 Chrome 扫码登录，取 cookie | 固定的 8 个限时免费模型（`TokenHub/*` / `Hunyuan3/*`） | 腾讯云账号里的免费额度 |
+| **豆包** | 独立 Chrome 登录 doubao.com，取 cookie 与设备指纹 | 官方 `brief_list` 接口动态拉，当前账号 16 个 | 豆包账号自己的免费额度（含签到赠送），**不是**火山方舟 API 额度 |
+| **Antigravity** | Antigravity IDE 的 OAuth（PKCE + 本地回调） | `fetchAvailableModels` 动态拉 | Google 账号的 Cloud Code Assist 额度 |
+
+三个都需要本机装有 **Chrome / Edge / Chromium** 之一（登录器会自动探测路径）。豆包那个浏览器是**有头**的 —— 豆包按浏览器特征判定，headless 一律被风控拒绝（`710022004`）；启动后会通过 CDP 最小化，平时看不见。装 Antigravity 的机器如果同时配了「自定义模型」里的 Gemini 代理，反代会默认复用，避免国内直连超时。
+
+### 模型怎么进 WorkBuddy
+
+每个平台各有一个模型勾选器，两种标记：
+
+- **轮换** —— 参与 `xxx/auto` 的自动轮换，某个模型被限流时自动换下一个；
+- **单独** —— 以独立模型名出现在 WorkBuddy 的模型选择器里。
+
+**勾选即写入** `~/.workbuddy/models.json`，不用再点保存。每个平台的「启用」开关关掉时，当场把该平台的模型从 `models.json` 里清掉 —— 用不上的条目不会一直塞着。写入前会备份，只动带本程序标记的条目，其他渠道的模型不受影响。
+
+### 内置网关
+
+网关（Node 脚本 + 运行时）**打在 app 包里**，首次启动解包到 `~/.wb-checkin-gateway`，分配置、日志、pid 文件。随包分发的 `config.json` 已清空所有渠道 key 与登录凭据。
+
+| 平台 | 常驻方式 | 重启 |
+| --- | --- | --- |
+| macOS | 注册 LaunchAgent（`ai.wbgateway.openrouter-free`） | `launchctl kickstart` |
+| Windows | `run.cmd` 启动，`CREATE_NO_WINDOW` 不弹黑框 | 按 `.gateway.pid` 走 `taskkill /PID`（不用 `/IM node.exe`，否则会杀掉你自己跑的 node） |
+
+升级 app 时会**逐文件比对**网关脚本内容，发现不一致就重启常驻进程 —— `launchd` 只在进程退出时重读脚本，不主动重启的话会一直跑旧路由（表现为「点登录返回未知接口」）。另外登录类命令带一次自动重试：遇到「网关无响应 / 未知接口」会先重启网关再重发。
+
+「自定义模型」页底部是诊断区：网关版本是否与 app 一致、`models.json` 写入结果、三个平台的登录态、最近日志。出问题先看这里，比猜快。
+
 ## 数据位置
 
 ```
@@ -331,8 +387,21 @@ WorkBuddy → 127.0.0.1:41980 → 隔离的 opencode serve → OpenCode Zen 免�
 ├── config.json          自动签到与本地 AI 监控配置
 ├── checkin-logs.json    签到日志（脱敏）
 ├── ferry/               模型摆渡（0700）：api-key、settings.json、status.json、日志、enabled 标记
+├── profiles/            账号现场快照（按 uid 分目录）
 └── backups/             切换账号前的登录态备份
+
+~/.wb-checkin-gateway/   内置网关（首次启动从 app 解包）
+├── config.json          各渠道 key、cookie、登录态、注入开关（0600）
+├── gateway.mjs          网关本体，零依赖
+├── doubao_bridge.mjs    豆包：CDP 驱动浏览器、拼请求、解析帧
+├── orcaterm_auth.mjs    OrcaTerm 扫码登录器
+├── antigravity.mjs      Antigravity OAuth 反代
+├── node                 运行时（macOS；Windows 上是 node.exe）
+├── .gateway.pid         进程号，重启时按它精确杀进程
+└── gateway.log          运行日志
 ```
+
+豆包与 OrcaTerm 的浏览器用独立 profile（`.doubao-chrome-profile` / `.orcaterm-chrome-profile`），与你日常用的浏览器互不干扰；登录态是普通 cookie，放在网关的 `config.json` 里，**不会**写进系统钥匙串或上传。
 
 ## 没有签名意味着什么（排错）
 
@@ -393,20 +462,30 @@ npm install
 npm run app:build       # 产物在 src-tauri/target/release/bundle/
 ```
 
+**构建前先把 `src-tauri/tauri.conf.json` 的 `bundle.macOS.signingIdentity` 临时改成 `"-"`**（仓库里配的是作者本机的证书 ID，别人机器上没有这个证书会签名失败），构建完改回去。对外分发的一直是 adhoc 签名，不是开发者签名。
+
+打完 `.app` 用脚本单独造 DMG（`tauri build --bundles dmg` 依赖 Finder 自动化，受限环境会失败）：
+
+```bash
+scripts/make-dmg.sh <版本号>
+```
+
 升版本用单一入口，它同步四处并插入 CHANGELOG 条目（手工改容易漏掉 `Cargo.lock`）：
 
 ```bash
-scripts/bump-version.sh 0.11.0            # 改版本号 + 在 CHANGELOG 顶部插入待填条目
-scripts/bump-version.sh 0.11.0 --dry-run  # 只看会改什么，不落盘
+scripts/bump-version.sh 0.14.7            # 改版本号 + 在 CHANGELOG 顶部插入待填条目
+scripts/bump-version.sh 0.14.7 --dry-run  # 只看会改什么，不落盘
 ```
+
+> 脚本依赖 CHANGELOG 里的 `## [未发布]` 标记来定位插入点。缺这个标记会报错并回滚 —— 发布后别把它删掉。
 
 发布顺序：
 
 1. 填 `CHANGELOG.md` 里新版本的条目
-2. `npm run app:build` 构建，dmg 归档到仓库根 `WB-Checkin-<版本>-arm64.dmg`
+2. `npm run app:build` 构建 → `scripts/make-dmg.sh <版本>` 出 dmg
 3. 提交并 push 到 `main` —— `verify-windows` 自动跑一遍 Windows 编译（`--no-bundle`，只编译不打包、不产出安装包）
 4. 绿了再打标签 `git tag -a v<版本> -m "..."` 并 `git push origin v<版本>`，触发 `build-windows` 产出 NSIS 安装包并自动挂到 Release
-5. `gh release edit` 写说明、`gh release upload` 传 dmg
+5. `gh release edit` 写说明、`gh release upload` 传 dmg（CI 只挂 `*.exe`，dmg 必须手动上传）
 
 **先验证再打标签**：标签是对外可见的，编译失败时不该已经存在一个公开的坏版本。
 
@@ -440,7 +519,9 @@ node scripts/verify-popover-refresh.mjs
 
 ## 用到的接口
 
-签到、积分、账号资料均通过官方客户端的接口调用，鉴权使用账号自己的 token。请求清单与参数不在此展开。
+签到、积分、账号资料均通过官方客户端的接口调用，鉴权使用账号自己的 token。
+
+网页额度渠道调用的是各平台自己的网页接口（豆包 `chat/completion`、OrcaTerm 的平台网关、Antigravity 的 `v1internal`），鉴权用你登录后的 cookie 或 OAuth token，同样是「账号自己的凭证访问账号自己的额度」。请求清单与参数不在此展开。
 
 ## 注意
 
@@ -454,6 +535,9 @@ node scripts/verify-popover-refresh.mjs
 - 本地 AI 监控是**只读**的：只建 TCP 连接、只调后端自己的只读接口、只读日志文件，不写入、不启停任何服务。
 - 监控每 2 秒刷新一次，但只在**窗口可见且停在「本地 AI」标签页**时轮询；窗口收起、切到别的标签页、或 App 在后台时都会停止，切回来立即恢复。
 - 监控依赖本机路径与端口。把 App 装到另一台电脑后，「监控设置」里的路径若不同，需要重新填一次；日志目录与 smctemp 的约定位置在多台机器上一致时可留空。
+- 网页额度渠道消耗的是**你账号在该平台的免费额度**，与 WorkBuddy 自己的积分无关；额度规则由平台单方决定，随时可能收紧或下线，届时对应模型会失效 —— 面板会显示上游返回的错误码，而不是笼统的「失败」。
+- 豆包与 OrcaTerm 的登录态是 cookie，有有效期。失效后到对应标签页点「重新登录」重扫一次；豆包的请求若被平台风控拒绝（`710022002` / `710022004`），面板会提示，同一账号会进入一段冷却期，避免反复触发。
+- 内置网关监听 `127.0.0.1:8901`，**本机无鉴权**。不需要这些渠道时把功能关掉，端口就不会起。
 - 本项目为个人自用工具，非官方产品。
 
 ## 使用范围与免责
