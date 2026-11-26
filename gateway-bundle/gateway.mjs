@@ -625,6 +625,13 @@ function payloadHasImage(payload) {
 }
 
 function supportsPayload(entry, payload) {
+  // 网页模拟的两个渠道吃不到图片：豆包要先把图传进它自己的对象存储、再把资源 id 塞进消息，
+  // OrcaTerm 是私有协议。以前这里是静默丢弃 —— 图片被过滤掉、模型只看到文字，
+  // 用户看到的就是「模型说它看不到图」。现在把这俩排除，让候选落到真能看图的模型上；
+  // 一个都不剩时返回 400，明确说明原因。
+  if (payloadHasImage(payload) && (entry.kind === 'doubao' || entry.kind === 'orcaterm')) {
+    return false;
+  }
   const lim = entry.limits;
   if (!lim) return true;
   if (lim.image === false && payloadHasImage(payload)) return false;
@@ -882,7 +889,7 @@ async function handleCompletions(req, res, rawBody) {
 
   const list = rawList.filter((e) => supportsPayload(e, payload));
   if (!list.length) {
-    return openAiError(res, 400, '本次请求含图片，但当前分组没有支持视觉输入的模型。', 'invalid_request_error');
+    return openAiError(res, 400, '本次请求含图片，但没有能读图的候选模型。豆包与 OrcaTerm 走的是网页版，拿不到图片；请改用 Antigravity（Gemini）或自己填 key 的视觉模型。', 'invalid_request_error');
   }
 
   const tried = [];

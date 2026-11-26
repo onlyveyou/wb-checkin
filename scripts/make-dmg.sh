@@ -47,6 +47,12 @@ for vol in $VOLS; do
 done
 rm -f "$BUNDLE"/macos/rw.*.dmg
 
+# hdiutil 默认把临时镜像写到 /var/folders（系统盘）。系统盘剩几 GB 时它会直接报
+# 「设备上无剩余空间」，而仓库所在的盘可能还有几百 GB。先把它改到仓库旁边的 .dmg-tmp。
+TMPDIR="${WB_CHECKIN_TMPDIR:-$ROOT/.dmg-tmp}"
+mkdir -p "$TMPDIR"
+export TMPDIR
+
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 # 用 ditto 而不是 cp -R：签名和扩展属性都得原样带过去，否则用户那边会报「已损坏」

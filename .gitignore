@@ -31,3 +31,6 @@ gateway-bundle/config.json.bak*
 /WB-Checkin_*-setup.exe
 *.bak-before-*
 *.bak-single-provider
+
+# dmg 临时镜像目录（系统盘紧张时用仓库所在盘）
+/.dmg-tmp

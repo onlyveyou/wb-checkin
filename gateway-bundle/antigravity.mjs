@@ -598,26 +598,80 @@ function textOf(content) {
   return '';
 }
 
-export function toGeminiContents(messages = []) {
+/** 把 OpenAI 的 image_url 变成 Gemini 的 inlineData。
+ *  data URL 直接取 base64；http(s) 的要现下 —— Gemini 的 fileData 只认 Google 自己托管的 URI，
+ *  普通图片地址塞进去会被拒。超过 8MB 的图放弃（inlineData 上限 20MB，留余量）。 */
+async function toInlineImage(src) {
+  if (typeof src !== 'string' || !src) return null;
+  const m = src.match(/^data:([^;,]+?);base64,(.+)$/s);
+  if (m) return { mimeType: m[1], data: m[2] };
+  if (!/^https?:\/\//i.test(src)) return null;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    const r = await fetch(src, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!r.ok) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (!buf.length || buf.length > 8 * 1024 * 1024) return null;
+    const mime = (r.headers.get('content-type') || 'image/png').split(';')[0].trim();
+    return { mimeType: mime, data: buf.toString('base64') };
+  } catch {
+    return null;
+  }
+}
+
+/** 一条消息拆成 Gemini 的 parts：文本 + 图片。 */
+async function partsOf(content) {
+  if (typeof content === 'string') {
+    const t = content.trim();
+    return t ? [{ text: t }] : [];
+  }
+  if (!Array.isArray(content)) return [];
+  const parts = [];
+  for (const p of content) {
+    if (typeof p === 'string') {
+      if (p.trim()) parts.push({ text: p });
+      continue;
+    }
+    if (!p) continue;
+    if (p.type === 'text' && typeof p.text === 'string' && p.text.trim()) {
+      parts.push({ text: p.text });
+      continue;
+    }
+    if (p.type === 'image_url' || p.type === 'input_image' || p.type === 'image') {
+      const url = typeof p.image_url === 'string' ? p.image_url : p.image_url?.url;
+      const inline = await toInlineImage(url);
+      if (inline) parts.push({ inlineData: inline });
+    }
+  }
+  return parts;
+}
+
+export async function toGeminiContents(messages = []) {
   const contents = [];
   const system = [];
   for (const m of messages) {
     const role = m?.role || 'user';
-    const text = textOf(m?.content);
-    if (!text) continue;
-    if (role === 'system' || role === 'developer') { system.push(text); continue; }
+    if (role === 'system' || role === 'developer') {
+      const t = textOf(m?.content);
+      if (t) system.push(t);
+      continue;
+    }
+    const parts = await partsOf(m?.content);
+    if (!parts.length) continue;
     const gRole = role === 'assistant' ? 'model' : 'user';
     const last = contents[contents.length - 1];
     // 连续同角色合并：Gemini 要求 user/model 交替，否则 400
-    if (last && last.role === gRole) last.parts.push({ text });
-    else contents.push({ role: gRole, parts: [{ text }] });
+    if (last && last.role === gRole) last.parts.push(...parts);
+    else contents.push({ role: gRole, parts });
   }
   if (!contents.length) contents.push({ role: 'user', parts: [{ text: '' }] });
   return { contents, system };
 }
 
-function bodyFor(payload, model, project) {
-  const { contents, system } = toGeminiContents(payload.messages || []);
+async function bodyFor(payload, model, project) {
+  const { contents, system } = await toGeminiContents(payload.messages || []);
   const gen = { maxOutputTokens: Math.min(Number(payload.max_tokens || 8192) || 8192, 65536) };
   if (typeof payload.temperature === 'number') gen.temperature = payload.temperature;
   if (typeof payload.top_p === 'number') gen.topP = payload.top_p;
@@ -660,7 +714,7 @@ export function antigravityStream(payload, model, onEvent) {
       token = await accessToken();
       project = await ensureProject(token);
     } catch (e) { return reject(e); }
-    const body = JSON.stringify(bodyFor(payload, model, project));
+    const body = JSON.stringify(await bodyFor(payload, model, project));
     const proxy = proxyOf();
     const base = API_BASES[0];
     const url = `${base}/v1internal:streamGenerateContent?alt=sse`;
