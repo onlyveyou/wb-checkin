@@ -62,6 +62,10 @@ pub async fn state() -> Value {
                 "ok": true,
                 "offline": false,
                 "credential": a.get("credential").and_then(Value::as_bool).unwrap_or(false),
+                // 上游判过这份 token 不可用（地区限制 / 401）：面板要如实说，
+                // 否则「已登录 + 100%」会让人以为只是慢。
+                "expired": a.get("expired").and_then(Value::as_bool).unwrap_or(false),
+                "error": a.get("error").and_then(Value::as_str).unwrap_or(""),
                 "email": a.get("email").and_then(Value::as_str).unwrap_or(""),
                 "plan": a.get("plan").and_then(Value::as_str).unwrap_or(""),
                 "models": a.get("models").cloned().unwrap_or(json!([])),

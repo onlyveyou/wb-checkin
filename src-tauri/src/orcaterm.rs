@@ -68,6 +68,10 @@ pub async fn state() -> Value {
                 "ok": true,
                 "offline": false,
                 "credential": credential,
+                // 凭据被上游拒过（cookie 过期）：面板要显示「已失效，去重新登录」，
+                // 不能因为 cookie 还在就继续写「已登录」——用户会以为能直接开用。
+                "expired": orca.get("expired").and_then(Value::as_bool).unwrap_or(false),
+                "error": orca.get("error").and_then(Value::as_str).unwrap_or(""),
                 "uin": orca.get("uin").and_then(Value::as_str).unwrap_or(""),
                 "models": orca.get("models").cloned().unwrap_or(json!([])),
                 "injectSystem": orca.get("injectSystem").and_then(Value::as_str).unwrap_or(""),

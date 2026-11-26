@@ -20,7 +20,7 @@
  */
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, rmSync, openSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, appendFileSync, existsSync, rmSync, openSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { doubaoChat, doubaoCheckin, doubaoQuota, doubaoStatus, startAutoCheckin, doubaoCatalog, doubaoModelIds } from './doubao_bridge.mjs';
@@ -44,6 +44,13 @@ const ANTIGRAVITY_STATUS_PATH = path.join(DIR, '.antigravity-login-status.json')
 let ORCA_LOGIN_PENDING = false;
 let ORCA_LOGIN_PENDING_AT = 0;
 let CFG = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
+
+// config.json 会被 app 随时改写（面板改配置、各渠道登录器写 cookie/token、换号）。
+// 早先只有显式调 /admin/api/reload 才重读，漏一次就出现「刚登录完，网关还说未登录」——
+// Antigravity 的 refresh_token 正是 app 写进去的，网关内存里仍是空的，调用必然 401。
+// 这里记下 mtime，每个请求进来先比对，变了自动跟；任何一方改完都立刻生效。
+let CONFIG_MTIME = 0;
+try { CONFIG_MTIME = statSync(CONFIG_PATH).mtimeMs; } catch {}
 
 // 外发一律走系统 curl：Node fetch 不读 HTTPS_PROXY，国内直连必超时。
 // Windows 自带 curl.exe（System32），macOS 在 /usr/bin/curl。
@@ -732,7 +739,10 @@ function classify(entry, code, bodyStr) {
   }
   // 401/403 多半是这家 provider 的 key 失效或是「未开通该模型」，换下一家比透传有用
   if (code === 401 || code === 403) {
-    return { retry: true, cooldown: COOLDOWN_TIMEOUT, reason: `${code} ${entry.pname} 鉴权/未开通：` + errMsg.slice(0, 70) };
+    // 中文提示（地区限制、重新登录）截到 70 字后半句就没了，变成一句废话；
+    // 英文/HTML 那类长响应仍然截断，免得把整页塞进错误信息里。
+    const cut = /[\u4e00-\u9fa5]/.test(errMsg) ? errMsg.slice(0, 300) : errMsg.slice(0, 70);
+    return { retry: true, cooldown: COOLDOWN_TIMEOUT, reason: `${code} ${entry.pname} 鉴权/未开通：${cut}` };
   }
   return { retry: false, passthrough: true };
 }
@@ -752,10 +762,63 @@ function openAiError(res, code, message, type = 'upstream_error') {
   sendJson(res, code, { error: { message, type, code } });
 }
 
-/** OrcaTerm 是否已登录（cookie 里有 skey 才算）。登录器写入后立即生效。 */
+// ── 凭据失效标记 ─────────────────────────────────────────────────────────
+// 上游明确拒绝过凭据时（OrcaTerm 的 VERIFY_SKEY_UIN_FAILED、Antigravity 的
+// UNSUPPORTED_LOCATION/401），只把错误丢给客户端是不够的：面板和 /health 仍会报
+// 「已登录」，用户看着是好的，一用就报错，还会反复去点登录。
+// 这里记住「这份凭据被拒了」，状态如实变成已失效；凭据一变（重新登录写了新
+// cookie/token）指纹对不上就自动恢复，不需要用户去清什么标记。
+//
+// 必须落盘：这个标记活在内存里的话，网关每次重启（升级、开机、手动 kickstart）
+// 就忘了，界面又变回「已登录」—— 那正是要修的那个假象。
+const AUTH_FAILED_PATH = path.join(DIR, '.auth-failed.json');
+const AUTH_FAILED = new Map();
+try {
+  const saved = JSON.parse(readFileSync(AUTH_FAILED_PATH, 'utf8'));
+  for (const [kind, record] of Object.entries(saved || {})) {
+    if (record && record.fp) AUTH_FAILED.set(kind, record);
+  }
+} catch {}
+function saveAuthFailed() {
+  try {
+    writeFileSync(AUTH_FAILED_PATH, JSON.stringify(Object.fromEntries(AUTH_FAILED), null, 2));
+  } catch {}
+}
+function credFp(value) {
+  const s = String(value || '');
+  if (!s) return '';
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return `${s.length}-${(h >>> 0).toString(16)}`;
+}
+function credOf(kind) {
+  const p = PROVIDERS[kind] || {};
+  return p.cookie || p.refresh_token || p.apiKey || '';
+}
+function markAuthFailed(kind, message, code = 401) {
+  const fp = credFp(credOf(kind));
+  const prev = AUTH_FAILED.get(kind);
+  AUTH_FAILED.set(kind, { fp, message, code, at: Date.now() });
+  saveAuthFailed();
+  if (!prev || prev.fp !== fp) log('WARN', `${kind} 凭据被上游拒绝，登录态置为「已失效」：${message}`);
+}
+/** 返回这条渠道当前是否处于「凭据被拒」状态；凭据换过就自动清掉 */
+function authFailed(kind) {
+  const record = AUTH_FAILED.get(kind);
+  if (!record) return null;
+  if (credFp(credOf(kind)) !== record.fp) {
+    AUTH_FAILED.delete(kind);
+    saveAuthFailed();
+    return null;
+  }
+  return record;
+}
+
+/** OrcaTerm 是否已登录（cookie 里有 skey、且没被上游拒过）。 */
 function orcaLoggedIn() {
   const c = PROVIDERS.orcaterm?.cookie || '';
-  return /skey=[^;]{6,}/i.test(c);
+  if (!/skey=[^;]{6,}/i.test(c)) return false;
+  return !authFailed('orcaterm');
 }
 const ORCA_LOGIN_HINT = 'OrcaTerm 未登录：请在 WB-Checkin 软件的「OrcaTerm」标签里点「扫码登录」腾讯云，'
   + '登录后凭据会自动写入网关（未登录时上游是静默空流，会误报"空内容"，所以这里直接拦下）。';
@@ -780,7 +843,10 @@ function wantsDoubao(payload, requested) {
 }
 /** Antigravity（Google Cloud Code Assist）：OAuth refresh_token 在 config.providers 里 */
 function antigravityLoggedIn() {
-  return Boolean(PROVIDERS.antigravity?.refresh_token);
+  if (!PROVIDERS.antigravity?.refresh_token) return false;
+  // 上游已经明确拒过这份凭据（401/403 或地区限制）：状态得如实说「不可用」，
+  // 否则面板报「已登录」，用户一用就报错，还以为是偶发。
+  return !authFailed('antigravity');
 }
 const ANTIGRAVITY_LOGIN_HINT = 'Antigravity 未登录：请在 WB-Checkin 软件的「Antigravity」标签里点「Google 登录」，'
   + '登录后 token 自动写入本机网关，之后 WorkBuddy 里就能直接用 Gemini / Claude。';
@@ -868,16 +934,21 @@ async function handleCompletions(req, res, rawBody) {
   // 未登录 OrcaTerm 时上游是静默空流（200 无内容），会被误判成"空内容/模型故障"。
   // 这里提前拦下，给出明确提示，避免用户以为是模型坏了。
   if (wantsOrca(payload, requested) && !orcaLoggedIn()) {
-    log('WARN', '拦截 OrcaTerm 请求：未登录');
-    return openAiError(res, 401, ORCA_LOGIN_HINT, 'orcaterm_not_logged_in');
+    const failed = authFailed('orcaterm');
+    log('WARN', `拦截 OrcaTerm 请求：${failed ? '登录态已失效' : '未登录'}`);
+    // 失效和「从没登过」是两回事：前者该点「重新登录」，后者该点「扫码登录」。
+    return openAiError(res, 401, failed
+      ? failed.message
+      : ORCA_LOGIN_HINT, 'orcaterm_not_logged_in');
   }
   if (wantsDoubao(payload, requested) && !doubaoLoggedIn()) {
     log('WARN', '拦截豆包请求：未登录');
     return openAiError(res, 401, DOUBAO_LOGIN_HINT, 'doubao_not_logged_in');
   }
   if (wantsAntigravity(payload, requested) && !antigravityLoggedIn()) {
-    log('WARN', '拦截 Antigravity 请求：未登录');
-    return openAiError(res, 401, ANTIGRAVITY_LOGIN_HINT, 'antigravity_not_logged_in');
+    const failed = authFailed('antigravity');
+    log('WARN', `拦截 Antigravity 请求：${failed ? '已失效/不可用' : '未登录'}`);
+    return openAiError(res, 401, failed ? failed.message : ANTIGRAVITY_LOGIN_HINT, 'antigravity_not_logged_in');
   }
   const rawList = candidates(requested, payload.models);
   if (!rawList.length) {
@@ -925,6 +996,11 @@ async function handleCompletions(req, res, rawBody) {
         const t0 = Date.now();
         try {
           const d = isAg ? await antigravityChat(payload, entry.model) : await doubaoChat(lastUserText(payload), entry.model, doubaoSessionCtx(payload));
+          // 真出话了：之前记的失效（可能是网络不通、换了节点）作废，状态回到可用。
+          if (isAg && AUTH_FAILED.delete('antigravity')) {
+            saveAuthFailed();
+            log('INFO', 'antigravity 调用恢复正常，清除失效标记');
+          }
           r = {
             code: 200,
             body: JSON.stringify({
@@ -936,8 +1012,14 @@ async function handleCompletions(req, res, rawBody) {
           };
         } catch (e) {
           log('WARN', `${entry.raw} → ${isAg ? 'Antigravity' : '豆包'}调用失败：${e.message}`);
+          // Antigravity 的凭据被上游否掉（401/403）或整片地区不开放时，把状态记成「已失效」：
+          // 面板与 /health 才会显示真实情况，而不是一直挂着「已登录」。
+          if (isAg && /401|403|授权失效|地区不可用|UNSUPPORTED_LOCATION/.test(e.message)) {
+            markAuthFailed('antigravity', e.message, 401);
+          }
           // 429 / 授权失效要按真实类别回，否则会被当成 5xx 重试到别家（用户看到的是别家回答）
-          const code = /429|额度已用完/.test(e.message) ? 429 : (/401|403|授权失效|未登录/.test(e.message) ? 401 : 502);
+          const code = /429|额度已用完/.test(e.message) ? 429
+            : (/401|403|授权失效|未登录|地区不可用/.test(e.message) ? 401 : 502);
           r = { code, body: JSON.stringify({ error: { message: e.message } }), ms: Date.now() - t0 };
         }
       } else {
@@ -956,6 +1038,8 @@ async function handleCompletions(req, res, rawBody) {
         }
       }
       if (orcaAuthError) {
+        // 记下来：面板/health 之后会如实报「已失效」，而不是继续显示「已登录」。
+        markAuthFailed('orcaterm', orcaAuthError, 401);
         return openAiError(res, 401, orcaAuthError, 'orcaterm_not_logged_in');
       }
       const cls = classify(entry, r.code, rBody);
@@ -1006,7 +1090,10 @@ async function handleCompletions(req, res, rawBody) {
       }
       tried.push(entry.raw);
       lastDetail = cls.reason;
-      lastCode = r.code === 429 ? 429 : (r.code === 401 || r.code === 403 ? 502 : (r.code || 502));
+      lastCode = r.code === 429 ? 429
+        // 401/403 一般是「这家没开这个模型」，报 502 更贴切；但 Antigravity 的 401
+        // 是账号本身不可用（地区限制 / 授权被撤），报 502 会让人以为是网关坏了。
+        : (r.code === 401 || r.code === 403 ? (entry.pname === 'antigravity' ? 401 : 502) : (r.code || 502));
       log('WARN', `${entry.raw} → 失败(${r.code}) ${cls.reason} · 换下一个`);
       continue;
     }
@@ -1123,13 +1210,16 @@ async function handleCompletions(req, res, rawBody) {
   }
 
   log('ERROR', `全部候选失败：${tried.join(', ')} · 最后错误 ${lastDetail}`);
-  const tailMsg = blockedProviders.size
+  // 「稍后重试」只对限流/抖动成立；地区限制、授权失效这种确定性原因，等多久都不会变。
+  const tailMsg = blockedProviders.size || /地区不可用|UNSUPPORTED_LOCATION|重新登录|未登录/.test(lastDetail)
     ? ''
     : '建议稍后重试，或在 /health 查看各模型冷却状态。';
   openAiError(
     res,
     blockedProviders.size ? 429 : lastCode,
-    `网关已尝试 ${tried.length} 个模型均失败。最后错误：${lastDetail}。${tailMsg}`,
+    // 上游/我们自己的提示多半已经以句号收尾，别拼成「渠道。。」
+    `网关已尝试 ${tried.length} 个模型均失败。最后错误：${lastDetail}`
+      + (/[。.！!？?]$/.test(lastDetail) ? '' : '。') + tailMsg,
   );
 }
 
@@ -1150,19 +1240,21 @@ function handleModels(res) {
       },
     };
     if (e.pname === 'orcaterm') {
+      const failed = authFailed('orcaterm');
       m.available = orcaOk;
-      m.status = orcaOk ? 'ok' : 'not_logged_in';
-      m.hint = orcaOk ? undefined : ORCA_LOGIN_HINT;
+      m.status = orcaOk ? 'ok' : (failed ? 'expired' : 'not_logged_in');
+      m.hint = orcaOk ? undefined : (failed ? failed.message : ORCA_LOGIN_HINT);
       m.name = (e.model.startsWith('auto') ? 'OrcaTerm 自动轮换' : 'OrcaTerm · ' + e.model)
-        + (orcaOk ? '' : '（未登录）');
+        + (orcaOk ? '' : (failed ? '（登录已失效）' : '（未登录）'));
     }
     if (e.pname === 'antigravity') {
+      const agFailed = authFailed('antigravity');
       const agOk = antigravityLoggedIn();
       m.available = agOk;
-      m.status = agOk ? 'ok' : 'not_logged_in';
-      m.hint = agOk ? undefined : ANTIGRAVITY_LOGIN_HINT;
+      m.status = agOk ? 'ok' : (agFailed ? 'expired' : 'not_logged_in');
+      m.hint = agOk ? undefined : (agFailed ? agFailed.message : ANTIGRAVITY_LOGIN_HINT);
       m.name = (e.model === 'auto' ? 'Antigravity 自动轮换' : 'Antigravity · ' + e.model)
-        + (agOk ? '' : '（未登录）');
+        + (agOk ? '' : (agFailed ? '（不可用）' : '（未登录）'));
     }
     return m;
   });
@@ -1183,9 +1275,22 @@ function handleHealth(res) {
       lastError: s.lastError || null,
     };
   });
+  const orcaFailed = authFailed('orcaterm');
+  const agFailed = authFailed('antigravity');
   sendJson(res, 200, {
     ok: true, uptimeSec: Math.round(process.uptime()), port: PORT, version: BUNDLE_VERSION,
-    orcaterm: { loggedIn: orcaLoggedIn(), hint: orcaLoggedIn() ? undefined : ORCA_LOGIN_HINT },
+    orcaterm: {
+      loggedIn: orcaLoggedIn(),
+      ...(orcaFailed ? { expired: true, error: orcaFailed.message, expiredAt: orcaFailed.at } : {}),
+      // 上游这句原文里已经带了「点重新登录」的动作，别再叠一遍。
+      hint: orcaFailed ? orcaFailed.message
+        : (orcaLoggedIn() ? undefined : ORCA_LOGIN_HINT),
+    },
+    antigravity: {
+      loggedIn: antigravityLoggedIn(),
+      ...(agFailed ? { expired: true, error: agFailed.message } : {}),
+      hint: agFailed ? agFailed.message : (antigravityLoggedIn() ? undefined : ANTIGRAVITY_LOGIN_HINT),
+    },
     tier: TIER, tiersAvailable: Object.keys(TIERS),
     queueSize: QUEUE.length,
     skipped: skippedEntries.length,
@@ -1263,7 +1368,26 @@ function reloadConfig({ keepTier } = {}) {
     || Object.keys(PROVIDERS)[0];
   TIER = (keepTier && TIER) || CFG.tier || TIER;
   TIERS = CFG.tiers || {};
+  try { CONFIG_MTIME = statSync(CONFIG_PATH).mtimeMs; } catch {}
   rebuildQueue();
+}
+
+/**
+ * 每个请求进来先看一眼 config.json 有没有被改过，改过就热重载。
+ * 只比对 mtime，命中时零开销；重载失败（正好读到写一半的文件）就保持旧配置，
+ * 并把 mtime 记成已处理，避免每个请求都刷同一条 WARN。
+ */
+function ensureFreshConfig() {
+  let mtime = 0;
+  try { mtime = statSync(CONFIG_PATH).mtimeMs; } catch { return; }
+  if (mtime === CONFIG_MTIME) return;
+  try {
+    reloadConfig({ keepTier: true });
+    log('INFO', 'config.json 已变化，自动热重载');
+  } catch (e) {
+    CONFIG_MTIME = mtime;
+    log('WARN', `config.json 变化但重载失败，继续用旧配置：${e.message}`);
+  }
 }
 
 function providerStats(name) {
@@ -1321,7 +1445,9 @@ function adminState() {
       models: CFG.orcaterm?.models || [],
       injectSystem: CFG.orcaterm?.injectSystem || '',
       autoLock: CFG.orcaterm?.autoLock !== false,
-      credential: Boolean((PROVIDERS.orcaterm?.cookie || '').includes('skey=')),
+      credential: orcaLoggedIn(),
+      expired: Boolean(authFailed('orcaterm')),
+      error: authFailed('orcaterm')?.message || '',
       uin: PROVIDERS.orcaterm?.uin || '',
       // 腾讯云不提供额度查询接口，只能给「这个渠道调了多少次 / 最近延迟」当用量参考
       stats: providerStats('orcaterm'),
@@ -1339,6 +1465,8 @@ function adminState() {
     antigravity: {
       models: rotateOf('antigravity'),
       credential: antigravityLoggedIn(),
+      expired: Boolean(authFailed('antigravity')),
+      error: authFailed('antigravity')?.message || '',
       email: PROVIDERS.antigravity?.email || '',
       plan: CFG.antigravity?.quota?.plan || '',
       labels: CFG.antigravity?.labels || {},
@@ -1763,8 +1891,20 @@ async function handleAdminApi(req, res, route) {
       });
     }
     if (route === '/admin/api/antigravity/quota') {
-      const q = await antigravityQuota({ force: body.force === true });
-      return sendJson(res, 200, q);
+      try {
+        const q = await antigravityQuota({ force: body.force === true });
+        // 拉到了额度说明这份凭据是好的：把之前记的失效清掉（可能是换了网络/重新登录）。
+        if (authFailed('antigravity')) {
+          AUTH_FAILED.delete('antigravity');
+          saveAuthFailed();
+        }
+        return sendJson(res, 200, q);
+      } catch (e) {
+        // 命中这里的基本都是确定性原因（地区限制、授权被撤、连不上 Google）。
+        // 记进失效标记，面板下次轮询就会显示「不可用 + 原因」，而不是一直转圈。
+        markAuthFailed('antigravity', e.message, 401);
+        throw e;
+      }
     }
     if (route === '/admin/api/antigravity') {
       // 只改「自动轮换内部用哪些模型」；可用模型清单由 fetchAvailableModels 决定
@@ -1793,6 +1933,8 @@ async function handleAdminApi(req, res, route) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+  // 配置可能刚被 app/登录器改过（见 ensureFreshConfig 注释），先对齐再用。
+  ensureFreshConfig();
 
   if (url.pathname === '/admin' || url.pathname === '/admin/') {
     // 面板本体每次现读，改完 HTML 刷新即可，不必重启

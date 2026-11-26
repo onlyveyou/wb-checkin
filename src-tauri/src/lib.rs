@@ -1076,6 +1076,12 @@ async fn freehub_diagnostics() -> Value {
     freehub::diagnostics().await
 }
 
+/// 渠道自检：四个渠道各真发一次最小对话，逐条返回 通过 / 失败 / 跳过 + 原因。
+#[tauri::command]
+async fn freehub_selfcheck() -> Value {
+    freehub::selfcheck().await
+}
+
 #[tauri::command]
 async fn freehub_start(app: tauri::AppHandle) -> Result<Value, String> {
     let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
@@ -1844,6 +1850,7 @@ pub fn run() {
             freehub_test,
             freehub_start,
             freehub_diagnostics,
+            freehub_selfcheck,
             freehub_open,
             orcaterm_inject_models,
             orcaterm_state,

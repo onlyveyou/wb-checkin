@@ -965,7 +965,11 @@ pub async fn diagnostics() -> Value {
     let platforms = json!({
         "orcaterm": {
             "cookie": non_empty("/providers/orcaterm/cookie"),
-            "loggedIn": state_value.pointer("/orcaterm/loggedIn").cloned().unwrap_or(Value::Null),
+            // 用 credential 而不是「cookie 里有没有 skey」：cookie 过期但还在时，
+            // 前者会说「不可用」，后者只会让人以为一切正常。
+            "loggedIn": state_value.pointer("/orcaterm/credential").cloned().unwrap_or(Value::Null),
+            "expired": state_value.pointer("/orcaterm/expired").and_then(Value::as_bool).unwrap_or(false),
+            "error": state_value.pointer("/orcaterm/error").and_then(Value::as_str).unwrap_or(""),
         },
         "doubao": {
             "cookie": non_empty("/providers/doubao/cookie"),
@@ -974,6 +978,9 @@ pub async fn diagnostics() -> Value {
         },
         "antigravity": {
             "refreshToken": non_empty("/providers/antigravity/refresh_token"),
+            "loggedIn": state_value.pointer("/antigravity/credential").cloned().unwrap_or(Value::Null),
+            "expired": state_value.pointer("/antigravity/expired").and_then(Value::as_bool).unwrap_or(false),
+            "error": state_value.pointer("/antigravity/error").and_then(Value::as_str).unwrap_or(""),
             "quota": state_value.pointer("/antigravity/quota").cloned().unwrap_or(Value::Null),
         },
     });
@@ -1226,4 +1233,184 @@ pub fn open(url: &str) -> Result<(), String> {
         return Err(format!("只允许打开 http/https 链接：{target}"));
     }
     crate::open_external(target)
+}
+
+// ---------------------------------------------------------------------------
+// 渠道自检
+//
+// 「面板显示已登录」和「实际能用」是两件事：cookie 过期、地区限制、端口没起，
+// 界面都看不出来，用户只有到 WorkBuddy 里选中模型、等半天报错才知道。
+// 这里对每个渠道真发一次最小对话（16 token），把结果连上游原话一起摆出来。
+// ---------------------------------------------------------------------------
+
+/// 时间戳（毫秒），前端用来显示「刚才测的」。
+fn stamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 单个渠道的探测。`skip` 有值时直接返回跳过原因，不发请求。
+async fn probe_channel(
+    key: &str,
+    title: &str,
+    model: &str,
+    timeout_secs: u64,
+    skip: Option<String>,
+) -> Value {
+    if let Some(reason) = skip {
+        return json!({ "key": key, "title": title, "model": model,
+            "status": "skipped", "message": reason, "ms": 0 });
+    }
+    let started = std::time::Instant::now();
+    let payload = json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": "只回复两个字：正常" }],
+        "max_tokens": 16,
+        "stream": false,
+    });
+    let request = match client(timeout_secs) {
+        Ok(http) => http
+            .post(format!("http://127.0.0.1:{PORT}/v1/chat/completions"))
+            .header("Content-Type", "application/json")
+            .json(&payload),
+        Err(error) => {
+            return json!({ "key": key, "title": title, "model": model, "status": "failed",
+                "message": error, "ms": started.elapsed().as_millis() as u64 })
+        }
+    };
+    match request.send().await {
+        Ok(response) => {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            let elapsed = started.elapsed().as_millis() as u64;
+            if status.is_success() {
+                let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                let answer = parsed
+                    .pointer("/choices/0/message/content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let upstream = parsed
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                return json!({ "key": key, "title": title, "model": model,
+                    "status": "ok", "ms": elapsed, "answer": answer, "upstream": upstream });
+            }
+            let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+            let message = parsed
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| text.chars().take(300).collect());
+            json!({ "key": key, "title": title, "model": model, "status": "failed",
+                "code": status.as_u16(), "message": message, "ms": elapsed })
+        }
+        Err(error) => {
+            let elapsed = started.elapsed().as_millis() as u64;
+            let message = if error.is_timeout() {
+                format!("{timeout_secs} 秒内没有回应（上游卡住或网络不通）")
+            } else {
+                format!("请求失败：{error}")
+            };
+            json!({ "key": key, "title": title, "model": model, "status": "failed",
+                "message": message, "ms": elapsed })
+        }
+    }
+}
+
+/// 一键自检：四个渠道并行各打一次，逐条给出 通过 / 失败 / 跳过。
+pub async fn selfcheck() -> Value {
+    let state = state().await;
+    if state
+        .get("offline")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return json!({ "ok": false, "offline": true,
+            "message": "网关没有在运行，先在「自定义模型」里点「启动网关」", "items": [], "at": stamp_ms() });
+    }
+    let inject = state.get("inject").cloned().unwrap_or_else(|| json!({}));
+    let enabled = |kind: &str| {
+        inject
+            .get(kind)
+            .and_then(|v| v.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let flag = |kind: &str, name: &str| {
+        state
+            .get(kind)
+            .and_then(|v| v.get(name))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let error_of = |kind: &str| {
+        state
+            .get(kind)
+            .and_then(|v| v.get("error"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+
+    // 网页额度渠道：没启用、凭据已失效、根本没登录，三种情况都不必再发请求 ——
+    // 发出去也是白等一个超时，直接把确定的原因写在结果里。
+    let web_skip = |kind: &str, login_hint: &str| -> Option<String> {
+        if !enabled(kind) {
+            return Some(format!(
+                "没有启用：在「{}」标签里打开「启用这个平台」，它的模型才会进 WorkBuddy",
+                kind
+            ));
+        }
+        if let Some(message) = error_of(kind) {
+            return Some(message);
+        }
+        if !flag(kind, "credential") {
+            return Some(login_hint.to_string());
+        }
+        None
+    };
+
+    let (custom, orca, doubao, ag) = tokio::join!(
+        probe_channel(
+            "custom",
+            "自定义模型（13 家上游轮换）",
+            "wb-free-auto",
+            45,
+            None
+        ),
+        probe_channel(
+            "orcaterm",
+            "OrcaTerm",
+            "orcaterm/auto",
+            60,
+            web_skip("orcaterm", "未登录：在「OrcaTerm」标签点「扫码登录」")
+        ),
+        probe_channel(
+            "doubao",
+            "豆包",
+            "doubao/auto",
+            120,
+            web_skip("doubao", "未登录：在「豆包」标签点「登录」")
+        ),
+        probe_channel(
+            "antigravity",
+            "Antigravity",
+            "antigravity/auto",
+            75,
+            web_skip("antigravity", "未登录：在「Antigravity」标签点「Google 登录」")
+        ),
+    );
+
+    let items = vec![custom, orca, doubao, ag];
+    let passed = items
+        .iter()
+        .filter(|item| item.get("status").and_then(Value::as_str) == Some("ok"))
+        .count();
+    json!({ "ok": true, "items": items, "passed": passed, "total": items.len(), "at": stamp_ms() })
 }

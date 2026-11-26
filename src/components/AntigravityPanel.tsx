@@ -47,8 +47,14 @@ export default function AntigravityPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<string | null>(null);
+  /** 静默轮询失败时也要留痕：不然面板只剩「已登录 + 剩余 —」，看着像还没加载。 */
+  const [quotaError, setQuotaError] = useState("");
 
   const credential = state?.credential === true || login?.credential === true;
+  // 上游明确拒过这份 token（地区限制 / 401）：此时 credential 也是 false，
+  // 但和「没登录」要区别对待 —— 重新登录解决不了地区限制，得照着 error 说。
+  const expired = state?.expired === true;
+  const expiredReason = state?.error || login?.message || "";
 
   const refresh = useCallback(async () => {
     try {
@@ -71,8 +77,10 @@ export default function AntigravityPanel({
     try {
       const next = await api.antigravityQuota(force);
       setQuota(next);
+      setQuotaError(next.error || "");
       if (next.error && !silent) setNotice(`额度接口返回：${next.error}`);
     } catch (error) {
+      setQuotaError(String(error));
       if (!silent) setNotice(`额度查询失败：${String(error)}`);
     } finally {
       if (!silent) setBusy((b) => (b === "quota" ? null : b));
@@ -202,6 +210,8 @@ export default function AntigravityPanel({
       </div>
 
       {notice && <div className="ferry-note">{notice}</div>}
+      {expired && !credential && expiredReason && <div className="banner">{expiredReason}</div>}
+      {!expired && quotaError && <div className="banner">额度查询失败：{quotaError}</div>}
 
       {offline ? (
         <div className="empty">
@@ -216,12 +226,16 @@ export default function AntigravityPanel({
               <div>
                 <div className="row-label">
                   <span style={{ color: credential ? "var(--green)" : "var(--red)" }}>{credential ? "●" : "○"}</span>{" "}
-                  {credential ? (state?.email || login?.email || "已登录") : "未登录"}
+                  {credential
+                    ? (state?.email || login?.email || "已登录")
+                    : expired ? "不可用（原因见下）" : "未登录"}
                 </div>
                 <div className="row-hint">
                   {credential
                     ? `方案 ${quota?.plan || state?.plan || "—"} · project ${quota?.project || "—"}`
-                    : "未登录时调用 Antigravity 模型会直接报错，不会静默降级到别家"}
+                    : expired
+                      ? expiredReason
+                      : "未登录时调用 Antigravity 模型会直接报错，不会静默降级到别家"}
                 </div>
               </div>
               <div style={{ textAlign: "right", flex: "none" }}>
@@ -233,7 +247,7 @@ export default function AntigravityPanel({
                     color: usedRatio === null ? "var(--fg)" : usedRatio <= 0.1 ? "var(--red)" : usedRatio <= 0.3 ? "var(--warn)" : "var(--green)",
                   }}
                 >
-                  {usedRatio === null ? "—" : pct(usedRatio)}
+                  {!credential && expired ? "—" : usedRatio === null ? "—" : pct(usedRatio)}
                 </div>
               </div>
             </div>

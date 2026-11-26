@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as api from "../api";
-import type { FreeHubDiagnostics, FreeHubProvider, FreeHubState } from "../types";
+import type { FreeHubDiagnostics, FreeHubProvider, FreeHubSelfcheck, FreeHubState } from "../types";
 
 /**
  * 自定义模型（免费渠道）。
@@ -65,6 +65,7 @@ export default function FreeHubPanel({
   const [form, setForm] = useState({ name: "", endpoint: "", key: "", proxy: "", models: "", note: "" });
   const [diag, setDiag] = useState<FreeHubDiagnostics | null>(null);
   const [showDiag, setShowDiag] = useState(false);
+  const [check, setCheck] = useState<FreeHubSelfcheck | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -133,6 +134,24 @@ export default function FreeHubPanel({
       setShowDiag(true);
     } catch (error) {
       onError(String(error));
+    }
+  }
+
+  /**
+   * 渠道自检：真发请求，代价是慢（豆包要拉有头浏览器，最坏两分钟）。
+   * 走 run 的话每项都会连带 refresh 状态，这里单独一个 busy 键就够了。
+   */
+  async function runSelfcheck() {
+    setBusy("diag:check");
+    setNotice(null);
+    try {
+      const result = await api.freehubSelfcheck();
+      setCheck(result);
+      if (result.offline) onError(result.message || "网关没有在运行");
+    } catch (error) {
+      onError(String(error));
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -613,14 +632,22 @@ export default function FreeHubPanel({
                   <div className="fh-fact">
                     <span>OrcaTerm</span>
                     <b>
-                      {diag.platforms.orcaterm.loggedIn ?? diag.platforms.orcaterm.cookie
-                        ? "已登录"
-                        : "未登录"}
+                      {diag.platforms.orcaterm.expired
+                        ? "登录已失效"
+                        : (diag.platforms.orcaterm.loggedIn ?? diag.platforms.orcaterm.cookie)
+                          ? "已登录"
+                          : "未登录"}
                     </b>
                   </div>
                   <div className="fh-fact">
                     <span>Antigravity</span>
-                    <b>{diag.platforms.antigravity.refreshToken ? "已授权" : "未登录"}</b>
+                    <b>
+                      {diag.platforms.antigravity.expired
+                        ? "不可用（地区/授权）"
+                        : (diag.platforms.antigravity.loggedIn ?? diag.platforms.antigravity.refreshToken)
+                          ? "已授权"
+                          : "未登录"}
+                    </b>
                   </div>
                   <div className="fh-fact">
                     <span>注入结果</span>
@@ -649,6 +676,52 @@ export default function FreeHubPanel({
                     复制诊断
                   </button>
                 </div>
+
+                <div className="row-label">渠道自检</div>
+                <div className="row-hint">
+                  面板写「已登录」不代表上游认这份凭据。这里四个渠道各真发一次最小对话，通了才算能用。
+                </div>
+                <div className="ferry-actions">
+                  <button className="btn sm" disabled={busy !== null} onClick={() => void runSelfcheck()}>
+                    {busy === "diag:check" && <span className="spin" />}
+                    {busy === "diag:check" ? "自检中…" : check ? "重新自检" : "开始自检"}
+                  </button>
+                  {check && !check.offline && (
+                    <span className="row-hint">
+                      {check.passed}/{check.total} 通过
+                    </span>
+                  )}
+                </div>
+                {check?.offline && <div className="banner">{check.message}</div>}
+                {check && check.items.length > 0 && (
+                  <>
+                    <div className="fh-facts">
+                      {check.items.map((item) => (
+                        <div className="fh-fact" key={item.key}>
+                          <span>{item.title}</span>
+                          <b>
+                            {item.status === "ok"
+                              ? `通过 · ${item.ms}ms${item.upstream ? ` · ${item.upstream}` : ""}`
+                              : item.status === "skipped"
+                                ? "跳过"
+                                : `失败${item.code ? ` ${item.code}` : ""} · ${item.ms}ms`}
+                          </b>
+                        </div>
+                      ))}
+                    </div>
+                    {check.items.some((item) => item.status !== "ok") && (
+                      <div>
+                        {check.items
+                          .filter((item) => item.status !== "ok")
+                          .map((item) => (
+                            <div className="row-hint" key={item.key}>
+                              <b>{item.title}</b>：{item.message}
+                            </div>
+                          ))}
+                      </div>
+                    )}
+                  </>
+                )}
                 {(() => {
                   const text = [
                     diag.logs.stderr && `── 网关 stderr ──\n${diag.logs.stderr}`,

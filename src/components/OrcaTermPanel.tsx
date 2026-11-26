@@ -31,6 +31,9 @@ const ORCA_ROWS: ModelRow[] = [
 ];
 
 function loginText(status: OrcaTermLoginStatus | null, state: OrcaTermState | null): string {
+  // credential 为 true 但上游已经拒过这份 cookie → 说「已失效」，别说「已登录」：
+  // 这两个词对应的动作不一样（一个直接用，一个去重新扫码）。
+  if (state?.expired) return "登录已失效，需要重新登录";
   if (state?.credential) return "已登录";
   if (!status) return "检查中…";
   switch (status.state) {
@@ -238,7 +241,9 @@ export default function OrcaTermPanel({
                 <div className="row-hint">
                   {credential
                     ? `腾讯云 uin ${state?.uin || login?.uin || "—"} · 凭据由网关保存，本应用只读取状态`
-                    : (login?.message || "未登录时调用 OrcaTerm 模型会直接报错，不会误报「空内容」")}
+                    : (state?.expired
+                      ? (state.error || "登录态已失效：点右上角「扫码登录」重新授权一次")
+                      : (login?.message || "未登录时调用 OrcaTerm 模型会直接报错，不会误报「空内容」"))}
                 </div>
               </div>
               <div style={{ textAlign: "right", flex: "none" }}>

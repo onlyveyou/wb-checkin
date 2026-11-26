@@ -1131,6 +1131,9 @@ async fn start_inner() -> Result<Value, String> {
     *SERVER.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
     let _ = fs::write(enabled_marker(), b"1");
     log_line(&format!("服务已启动 http://127.0.0.1:{PORT}/v1"));
+    // 上一次停止时把 models.json 里的条目摘掉了，这里按勾选补回来 ——
+    // 否则用户「停了再开」，WorkBuddy 里就看不到国际版模型了。
+    let _ = import_selected();
     Ok(status().await)
 }
 
@@ -1148,7 +1151,15 @@ pub async fn stop() -> Result<Value, String> {
     }
     let _ = fs::remove_file(enabled_marker());
     log_line("服务已停止");
-    Ok(json!({ "running": false, "phase": "stopped", "message": "已停止" }))
+    // 转发口已经没了：models.json 里指向它的条目必须一起清掉，否则 WorkBuddy
+    // 的模型下拉里还是那两个「国际 · xxx」，一选就报连接失败。
+    let cleaned = unimport_owned();
+    Ok(json!({
+        "running": false,
+        "phase": "stopped",
+        "message": "已停止",
+        "unimport": cleaned,
+    }))
 }
 
 /// 退出钩子用的同步版本：事件循环退出时没有 tokio 运行时可以 await。
@@ -1189,6 +1200,9 @@ pub async fn status() -> Value {
 /// 应用启动时的自动拉起：只有用户上次主动开过才启动。
 pub fn autostart_on_launch() {
     if !enabled_marker().exists() {
+        // 没打算跑：顺手把 models.json 里残留的条目清掉。老版本停摆渡时不清模型，
+        // 升级上来会停在「服务已停、模型还挂着」的状态，选一次就报连接失败。
+        let _ = unimport_owned();
         return;
     }
     tauri::async_runtime::spawn(async {
@@ -1733,6 +1747,107 @@ fn replace_file(path: &PathBuf, text: &str) -> std::io::Result<()> {
 /// id 撞上了就跳过（宁可少导一个，也不能覆盖别人的配置）。
 pub fn import_selected() -> Value {
     import_into(&models_file())
+}
+
+/// 从 `models.json` 里摘掉本功能写进去的条目。
+///
+/// 用户主动停掉摆渡时调用：转发服务（本进程内的 8799）已经不在了，条目还留着的
+/// 话，WorkBuddy 模型下拉里仍然是「国际 · xxx」，选中就是一条连不上的死链 ——
+/// 用户看到的是「功能坏了」，其实只是停摆渡时没清干净。
+/// 只动自己认领的条目（`is_owned_entry`），用户手写的一条不碰。
+pub fn unimport_owned() -> Value {
+    unimport_into(&models_file())
+}
+
+fn unimport_into(path: &PathBuf) -> Value {
+    for attempt in 0..3 {
+        let original = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return json!({ "ok": true, "removed": 0, "file": path.to_string_lossy() })
+            }
+            Err(error) => {
+                return json!({ "ok": false, "error": format!("读 models.json 失败：{error}") })
+            }
+        };
+        let document: Value = match serde_json::from_str(&original) {
+            Ok(value) => value,
+            Err(error) => {
+                return json!({
+                    "ok": false,
+                    "error": format!("models.json 不是合法 JSON，没有改动：{error}"),
+                })
+            }
+        };
+        let (list, mut wrapper) = match document {
+            Value::Array(items) => (items, None),
+            Value::Object(object) => {
+                let items = object
+                    .get("models")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                (items, Some(object))
+            }
+            _ => return json!({ "ok": false, "error": "models.json 结构不认识，没有改动" }),
+        };
+
+        let removed: Vec<String> = list
+            .iter()
+            .filter(|item| is_owned_entry(item))
+            .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        if removed.is_empty() {
+            return json!({ "ok": true, "removed": 0, "file": path.to_string_lossy() });
+        }
+        let kept: Vec<Value> = list.into_iter().filter(|item| !is_owned_entry(item)).collect();
+
+        let text = match wrapper.as_mut() {
+            Some(object) => {
+                object.insert("models".into(), json!(kept));
+                if let Some(available) = object.get_mut("availableModels").and_then(Value::as_array_mut) {
+                    available.retain(|id| {
+                        id.as_str()
+                            .map(|id| !removed.iter().any(|gone| gone == id))
+                            .unwrap_or(true)
+                    });
+                }
+                serde_json::to_string_pretty(&Value::Object(object.clone()))
+            }
+            None => serde_json::to_string_pretty(&Value::Array(kept)),
+        };
+        let Ok(text) = text else {
+            return json!({ "ok": false, "error": "序列化 models.json 失败" });
+        };
+
+        match fs::read_to_string(path) {
+            Ok(current) if current != original => {
+                if attempt == 2 {
+                    return json!({ "ok": false, "error": "models.json 正在被其它程序修改，稍后重试" });
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if path.exists() {
+            backup_models(path);
+        }
+        if let Err(error) = replace_file(path, &text) {
+            return json!({ "ok": false, "error": format!("写 models.json 失败：{error}") });
+        }
+        log_line(&format!(
+            "摆渡已停止，从 models.json 摘掉 {} 个国际版模型：{}",
+            removed.len(),
+            removed.join(", ")
+        ));
+        return json!({
+            "ok": true,
+            "removed": removed.len(),
+            "ids": removed,
+            "file": path.to_string_lossy(),
+        });
+    }
+    json!({ "ok": false, "error": "models.json 一直在变，稍后重试" })
 }
 
 /// 真正干活的版本，路径可注入 —— 单元测试要在临时目录里验证合并规则，

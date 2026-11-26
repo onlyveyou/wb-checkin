@@ -16,6 +16,7 @@ import type {
   FerryLogTail,
   FerryStatus,
   FreeHubDiagnostics,
+  FreeHubSelfcheck,
   FreeHubState,
   FreeHubTestResult,
   OrcaTermLoginStatus,
@@ -347,6 +348,9 @@ export const freehubStart = () => invoke<{ ok: boolean }>("freehub_start");
 
 /** 一键诊断：网关版本 / 注入结果 / 三平台登录态 / 日志尾部。 */
 export const freehubDiagnostics = () => invoke<FreeHubDiagnostics>("freehub_diagnostics");
+
+/** 渠道自检：四个渠道各真发一次最小对话，逐条给结论（可能要等十几秒到两分钟）。 */
+export const freehubSelfcheck = () => invoke<FreeHubSelfcheck>("freehub_selfcheck");
 
 /** 在系统浏览器打开「申请 key」页。与 openLink 分开：那条只放行 workbuddy 站内地址。 */
 export const freehubOpen = (url: string) => invoke<void>("freehub_open", { url });

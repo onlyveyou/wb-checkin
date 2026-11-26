@@ -24,6 +24,7 @@ gateway-bundle/node
 gateway-bundle/node.exe
 gateway-bundle/node-x64
 gateway-bundle/.gateway.pid
+gateway-bundle/.auth-failed.json
 gateway-bundle/config.json.bak*
 
 # 构建产物与临时备份：安装包走 Release，不进仓库

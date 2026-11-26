@@ -101,6 +101,11 @@ function curlJson(url, { method = 'POST', headers = {}, body = null, proxy = '',
       const code = Number((idx >= 0 ? out.slice(idx + 1) : '').trim()) || 0;
       let json = null;
       try { json = JSON.parse(raw); } catch {}
+      // code 0 = 根本没连上。curl 的 stderr 是唯一能说明原因的东西（代理拒连、DNS、
+      // TLS 证书），不落日志的话排查时只剩一句「HTTP 0」。
+      if (code === 0 && err.trim()) {
+        logLine('WARN', `curl 失败（proxy=${proxy || '无'}）：${err.trim().split('\n')[0]}`);
+      }
       resolve({ code, text: raw, json, error: err.trim() });
     });
   });
@@ -422,9 +427,25 @@ async function loadCodeAssist(token) {
   });
   if (!r || r.code !== 200) {
     const detail = r?.json?.error?.message || r?.error || `HTTP ${r?.code}`;
-    throw new Error(`loadCodeAssist 失败：${detail}`);
+    // code 0 = curl 根本没连上（国内直连 Google 必超时）：这是网络/代理问题，不是授权问题，
+    // 报成「请重新登录」会让用户反复扫码，扫多少次都没用。
+    const err = new Error(r?.code === 0
+      ? `连不上 Google（${detail}）：请给 Antigravity 配代理，或在「自定义模型」里把 Gemini 渠道的代理填上（会复用）`
+      : `loadCodeAssist 失败：${detail}`);
+    err.code = r?.code === 0 ? 'NETWORK' : 'UPSTREAM';
+    throw err;
   }
   const j = r.json || {};
+  // 地区限制：HTTP 200，但账号/出口 IP 所在地区不开放。这是上游政策，重新登录不会有任何变化。
+  const blocked = (j.ineligibleTiers || [])
+    .find((t) => String(t?.reasonCode || '') === 'UNSUPPORTED_LOCATION');
+  if (blocked) {
+    const err = new Error('Antigravity 当前地区不可用：上游明确返回 UNSUPPORTED_LOCATION'
+      + '（账号或出口 IP 所在地区不开放）。这不是登录问题，重新登录也一样；'
+      + '需要换到受支持地区的代理节点，或改用自定义模型 / 豆包等其它渠道。');
+    err.code = 'UNSUPPORTED_LOCATION';
+    throw err;
+  }
   const proj = j.cloudaicompanionProject;
   const project = typeof proj === 'string' ? proj : (proj?.id || '');
   const tier = j.paidTier?.id || j.currentTier?.id || '';
@@ -443,7 +464,11 @@ async function ensureProject(token) {
       writeCfgSafe(cfg);
       return info.project;
     }
-  } catch (e) { logLine('WARN', e.message); }
+  } catch (e) {
+    // 地区限制 / 连不上，往后走 onboardUser 也没意义（只会再吃一次 403），直接抛。
+    if (e.code === 'UNSUPPORTED_LOCATION' || e.code === 'NETWORK') throw e;
+    logLine('WARN', e.message);
+  }
   // onboardUser：返回长任务，最多等 30 秒
   const r = await apiCall('onboardUser', {
     tierId: 'free-tier',
@@ -767,12 +792,17 @@ export function antigravityStream(payload, model, onEvent) {
     });
     child.stderr.on('data', (d) => { errBody += d.toString(); });
     child.on('error', (e) => finish(new Error(`调用 curl 失败：${e.message}`)));
-    child.on('close', () => {
+    child.on('close', (exitCode) => {
       // 上游报错时多半不是 SSE：整个 body 就是一段 {"error":{...}}，必须当失败抛出去，
       // 否则网关会把它当「空响应」继续降级，用户只看到兜底模型的回答。
       if (!text && !thought) {
         const tail = (buf || rawOut).trim();
         if (tail || errBody) return finish(new Error(summarizeUpstream(errBody || tail)));
+        // 一个字都没收到、curl 又非 0 退出 = 根本没连上（DNS / 代理 / 超时）
+        if (exitCode) {
+          return finish(new Error(`连不上 Google（curl 退出码 ${exitCode}）：`
+            + '请检查 Antigravity 的代理设置（国内直连必超时）'));
+        }
       }
       finish(null);
     });
@@ -782,6 +812,10 @@ export function antigravityStream(payload, model, onEvent) {
 
 function summarizeUpstream(raw) {
   const text = String(raw || '');
+  if (/UNSUPPORTED_LOCATION/.test(text) || /not currently available in your location/i.test(text)) {
+    return 'Antigravity 当前地区不可用（上游 UNSUPPORTED_LOCATION）：账号或出口 IP 所在地区不开放，'
+      + '重新登录无效；换到受支持地区的代理节点，或改用自定义模型 / 豆包等其它渠道。';
+  }
   try {
     const j = JSON.parse(text);
     const e = j.error || j;

@@ -650,11 +650,40 @@ export interface FreeHubDiagnostics {
     appVersion?: string;
   } | null;
   platforms: {
-    orcaterm: { cookie: boolean; loggedIn: boolean | null };
+    orcaterm: { cookie: boolean; loggedIn: boolean | null; expired?: boolean; error?: string };
     doubao: { cookie: boolean; catalog: number; fallbackModels: number };
-    antigravity: { refreshToken: boolean; quota: unknown };
+    antigravity: {
+      refreshToken: boolean;
+      loggedIn?: boolean | null;
+      expired?: boolean;
+      error?: string;
+      quota: unknown;
+    };
   };
   logs: { stderr: string; stdout: string; doubaoLogin: string; orcatermLogin: string };
+}
+
+/** 单个渠道的自检结果：ok=通，failed=不通（带上游原话），skipped=没测（带确定的原因） */
+export interface FreeHubSelfcheckItem {
+  key: string;
+  title: string;
+  model: string;
+  status: "ok" | "failed" | "skipped";
+  ms: number;
+  answer?: string;
+  upstream?: string;
+  code?: number;
+  message?: string;
+}
+
+export interface FreeHubSelfcheck {
+  ok: boolean;
+  offline?: boolean;
+  message?: string;
+  items: FreeHubSelfcheckItem[];
+  passed?: number;
+  total?: number;
+  at?: number;
 }
 
 /** OrcaTerm 免费模型：凭据在网关 config.json，这里只读状态、不持有 cookie。 */
@@ -663,6 +692,9 @@ export interface OrcaTermState {
   offline?: boolean;
   message?: string;
   credential: boolean;
+  /** 上游明确拒过这份 cookie（过期/被撤）：此时 credential 也是 false，但动作是「重新登录」 */
+  expired?: boolean;
+  error?: string;
   uin: string;
   models: string[];
   injectSystem: string;
@@ -808,6 +840,9 @@ export interface AntigravityState {
   offline?: boolean;
   message?: string;
   credential: boolean;
+  /** 上游判过这份 token 不可用（401 / 地区限制）：重新登录未必有用，看 error 里的原因 */
+  expired?: boolean;
+  error?: string;
   email: string;
   plan: string;
   models: string[];

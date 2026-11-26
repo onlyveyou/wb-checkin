@@ -155,7 +155,9 @@ launchctl kickstart -k gui/$(id -u)/ai.wbgateway.openrouter-free
 
 ## 改配置后怎么重载
 
-改完 `config.json` 需要重启常驻进程才会生效（macOS 的 `launchd` 只在进程退出时重读脚本与配置）：
+`config.json` 是热的：每个请求进来先比对它的 mtime，变了就地 `reloadConfig({keepTier:true})` 再处理。所以改完**不用重启**，也不用谁记得调 `/admin/api/reload` —— 这条是给外部脚本留的快捷方式，不是必须步骤。
+
+启动一次之后要换的是**脚本本身**（`gateway.mjs` 等），那才需要重启常驻进程，因为 launchd 只在进程退出时重读：
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/ai.wbgateway.openrouter-free    # macOS
@@ -237,6 +239,8 @@ run.cmd              Windows 手动启动入口
 .node-arch           已解包的 node 架构（aarch64 / x86_64）
 .bundle-version      app 写入的包版本，/health 的 version 取自它
 .inject-status.json  最近一次模型注入结果
+.auth-failed.json    凭据被上游拒过的记录（cookie/token 指纹 + 原话），状态据此报「已失效」；
+                     凭据一换指纹对不上就自动失效，不用手动删
 gateway.log          运行日志
 stdout.log stderr.log
 doubao-login.log     豆包登录器输出（排错先看这个）
