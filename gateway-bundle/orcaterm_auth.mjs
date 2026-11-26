@@ -212,8 +212,17 @@ async function waitDebug(port, timeoutMs = 15000) {
   throw new Error('调试端口未起来：' + (last?.message || '超时'));
 }
 
+/** 浏览器是这套网页额度的前提。缺了就给一句人话，别把 ENOENT 扔给用户。 */
+function requireBrowser() {
+  if (existsSync(CHROME)) return;
+  throw new Error(
+    '这台机器上没有 Chrome / Edge / Chromium。OrcaTerm 扫码登录必须用真实浏览器（Safari 不行），'
+    + '请先安装 Google Chrome 或 Microsoft Edge，装好后重试。',
+  );
+}
+
 async function doLogin() {
-  if (!existsSync(CHROME)) throw new Error(`Chrome 不存在：${CHROME}（可用 CHROME_PATH 指定）`);
+  requireBrowser();
   setStatus('starting', { message: '正在启动独立浏览器…' });
   mkdirSync(PROFILE, { recursive: true });
   console.log('① 启动独立浏览器窗口（与你日常浏览器完全隔离）…');

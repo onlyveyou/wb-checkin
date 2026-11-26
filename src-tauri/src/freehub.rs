@@ -46,10 +46,18 @@ const LAUNCH_LABEL: &str = "ai.wbgateway.openrouter-free";
 /// app 内置网关资源目录（在 bundle 的 Resources 下），首次启动解包到用户目录。
 const BUNDLE_DIR: &str = "gateway-bundle";
 /// 随包更新的脚本；config.json 不在其中 —— 那份一旦落盘就是用户私有配置，绝不覆盖。
+///
+/// `node` / `node-x64` / `node.exe` 是运行时二进制，不参与脚本的逐字节同步，
+/// 由各自平台的分支单独处理（见 `install_node` 与 Windows 的 node.exe 段）。
 const BUNDLE_FILES: &[&str] = &[
     "gateway.mjs", "admin.html", "orcaterm_auth.mjs", "doubao_bridge.mjs", "antigravity.mjs",
-    "run.sh", "node", "README.md",
+    "run.sh", "node", "node-x64", "README.md",
 ];
+
+/// 二进制文件，不参与脚本内容比对。
+fn is_binary(name: &str) -> bool {
+    matches!(name, "node" | "node-x64" | "node.exe")
+}
 
 fn gateway_dir() -> PathBuf {
     crate::paths::home_dir().join(".wb-checkin-gateway")
@@ -84,6 +92,18 @@ fn copy_file(src: &Path, dst: &Path, executable: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// 当前进程实际运行的 CPU 架构。通用包里 Rust 代码有两份，系统按机器选中的那份跑，
+/// 所以这里的值等于「用户这台机器是什么架构」。
+fn running_arch() -> &'static str {
+    if cfg!(target_arch = "x86_64") { "x86_64" } else { "aarch64" }
+}
+
+/// 通用包里要解包哪一份 node：Apple 芯片用 `node`，Intel 用 `node-x64`。
+#[cfg(target_os = "macos")]
+fn node_source() -> &'static str {
+    if cfg!(target_arch = "x86_64") { "node-x64" } else { "node" }
+}
+
 /// 从 app Resources 复制到家目录的 node 会被 macOS 打上 com.apple.provenance 隔离标记，
 /// 直接执行会被 SIGKILL（exit 137）—— 症状就是扫码登录点了没反应、登录器秒退。
 /// 必须 adhoc 重签才能清掉标记。
@@ -109,12 +129,26 @@ fn node_runs(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 每次启动自检：内置 node 被系统杀（137）就重签一次，让已装旧版的用户自动修复。
+/// 每次启动自检：内置 node 跑不起来就自愈。两种成因都要覆盖 ——
+/// ① 被系统打上 provenance 后 SIGKILL（重签）；② 架构不对（Intel 机器上留着 arm64 的 node）。
 #[cfg(target_os = "macos")]
-fn ensure_node_runnable() {
+fn ensure_node_runnable(resource_dir: &Path) {
     let node = gateway_dir().join("node");
     if !node.exists() || node_runs(&node) {
         return;
+    }
+    let marker = gateway_dir().join(".node-arch");
+    let installed = std::fs::read_to_string(&marker).unwrap_or_default();
+    if installed.trim() != running_arch() {
+        let src = resource_dir.join(BUNDLE_DIR).join(node_source());
+        if src.exists() && copy_file(&src, &node, true).is_ok() {
+            let _ = resign_node(&node);
+            let _ = std::fs::write(&marker, running_arch());
+            if node_runs(&node) {
+                eprintln!("[freehub] node 架构不符，已换成 {} 版", running_arch());
+                return;
+            }
+        }
     }
     eprintln!("[freehub] 内置 node 无法执行，尝试重签…");
     match resign_node(&node) {
@@ -158,10 +192,26 @@ fn kill_gateway() {
         .ok()
         .and_then(|text| text.trim().parse::<u32>().ok());
     if let Some(pid) = pid {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
+        // pid 会被系统复用。上一次异常退出留下 pid 文件时，直接 taskkill 可能打到
+        // 用户自己的无关进程 —— 先确认这个 pid 现在真的是 node.exe 再杀。
+        let looks_like_node = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .creation_flags(CREATE_NO_WINDOW)
-            .output();
+            .output()
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .to_ascii_lowercase()
+                    .contains("node.exe")
+            })
+            .unwrap_or(false);
+        if looks_like_node {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+        } else {
+            eprintln!("[freehub] pid {pid} 已不是网关进程，跳过 kill");
+        }
     }
     let _ = std::fs::remove_file(gateway_pid_path());
     // 等端口真正释放，否则新进程 bind 会 EADDRINUSE
@@ -223,12 +273,16 @@ fn ensure_installed_windows(resource_dir: &Path) -> Result<bool, String> {
     let version_changed = installed_version.trim() != version;
     let mut changed = false;
 
-    // 脚本逐个按内容比对：版本号没动但打了新包也能同步过去
+    // 脚本逐个按内容比对：版本号没动但打了新包也能同步过去。
+    // 包里缺席的文件跳过（Windows 包里没有 mac 的 node / node-x64），不因此中断安装。
     for name in BUNDLE_FILES
         .iter()
-        .filter(|name| **name != "node" && **name != "run.sh")
+        .filter(|name| !is_binary(name) && **name != "run.sh")
     {
         let src = bundle.join(name);
+        if !src.exists() {
+            continue;
+        }
         let dst = dir.join(name);
         if same_content(&src, &dst) {
             continue;
@@ -246,13 +300,19 @@ fn ensure_installed_windows(resource_dir: &Path) -> Result<bool, String> {
             copy_file(&src_node, &node, false)?;
             changed = true;
         } else {
-            eprintln!("[freehub] bundle has no node.exe, falling back to system node");
+            // 不直接报错：机器上装了 node 也能跑（run.cmd 里有兜底）。
+            // 但这种情况要在诊断面板里能看见，否则用户只会看到「网关未运行」。
+            eprintln!("[freehub] bundle has no node.exe, falling back to system node in PATH");
         }
     }
 
     write_run_cmd(&dir)?;
     if first_install {
-        copy_file(&bundle.join("config.json"), &cfg, false)?;
+        let src_cfg = bundle.join("config.json");
+        if !src_cfg.exists() {
+            return Err(format!("app 内置网关配置缺失：{}", src_cfg.display()));
+        }
+        copy_file(&src_cfg, &cfg, false)?;
     }
     if version_changed {
         std::fs::write(&marker, version)
@@ -300,8 +360,13 @@ pub fn ensure_installed(resource_dir: &Path) -> Result<bool, String> {
         let mut changed = false;
 
         // 脚本逐个按内容比对：版本号相同但打了新包（或上次覆盖失败）也能同步过去。
-        for name in BUNDLE_FILES.iter().filter(|name| **name != "node") {
+        // 包里没有的文件直接跳过 —— Windows 包里没有 run.sh 之外的东西、通用包里两份 node，
+        // 不该因为某份资源缺席就让整次安装失败。
+        for name in BUNDLE_FILES.iter().filter(|name| !is_binary(name)) {
             let src = bundle.join(name);
+            if !src.exists() {
+                continue;
+            }
             let dst = dir.join(name);
             if same_content(&src, &dst) {
                 continue;
@@ -311,14 +376,30 @@ pub fn ensure_installed(resource_dir: &Path) -> Result<bool, String> {
             changed = true;
         }
 
-        // node 是 112MB 的二进制，不参与逐字节比对：首次安装或版本号变化时才复制。
+        // node 是 100MB+ 的二进制，不参与逐字节比对：首次安装、版本变化或架构不匹配时才复制。
+        // 包里带两份（node=arm64、node-x64=Intel），通用包在两种 Mac 上装出来的 app 是同一份，
+        // 必须按当前机器挑 —— 挑错的表现是 node 一执行就退，网关永远不在线。
         let node = dir.join("node");
-        if first_install || !node.exists() || (version_changed && !installed_version.trim().is_empty()) {
-            copy_file(&bundle.join("node"), &node, true)?;
+        let arch_marker = dir.join(".node-arch");
+        let installed_arch = std::fs::read_to_string(&arch_marker).unwrap_or_default();
+        let arch_changed = installed_arch.trim() != running_arch();
+        if first_install || !node.exists() || arch_changed
+            || (version_changed && !installed_version.trim().is_empty())
+        {
+            let src = bundle.join(node_source());
+            if !src.exists() {
+                return Err(format!(
+                    "app 内置 node 缺失：{}（本机是 {} 架构）",
+                    src.display(),
+                    running_arch()
+                ));
+            }
+            copy_file(&src, &node, true)?;
             // 复制后重签 node：跨目录复制会带 provenance，不重签会被系统 SIGKILL
             if let Err(error) = resign_node(&node) {
                 eprintln!("[freehub] node 重签失败：{error}");
             }
+            let _ = std::fs::write(&arch_marker, running_arch());
             changed = true;
         }
 
@@ -444,8 +525,8 @@ pub fn bootstrap_on_launch(resource_dir: &Path) {
             }
             Err(error) => eprintln!("[freehub] builtin gateway bootstrap failed: {error}"),
         }
-        // 旧版本解包时没重签的 node：每次启动自检一次，发现被杀就重签自愈
-        ensure_node_runnable();
+        // 旧版本解包时没重签的 node：每次启动自检一次，发现被执行不了就自愈
+        ensure_node_runnable(resource_dir);
     }
     #[cfg(target_os = "windows")]
     {

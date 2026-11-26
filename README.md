@@ -10,7 +10,7 @@ WorkBuddy / CodeBuddy 多账号每日自动签到 —— macOS 与 Windows 桌�
 
 ## 安装
 
-macOS 与 Windows 分开看。macOS 需要 10.15+，当前分发包**仅 arm64（Apple 芯片）**；Windows 为 64 位安装包。
+macOS 与 Windows 分开看。macOS 需要 10.15+，分发包是**通用二进制（Apple 芯片与 Intel 都能跑）**；Windows 为 64 位安装包。
 
 **macOS · 方式一：终端安装（推荐）**
 
@@ -22,20 +22,25 @@ curl -fsSL https://raw.githubusercontent.com/onlyveyou/wb-checkin/main/install.s
 
 **macOS · 方式二：手动下载 dmg**
 
-到 [Releases](https://github.com/onlyveyou/wb-checkin/releases/latest) 下载 `WB-Checkin-<版本>-arm64.dmg`。本包**没有 Apple 开发者签名**，经浏览器下载后首次双击会提示「已损坏」，先执行一次再打开：
+到 [Releases](https://github.com/onlyveyou/wb-checkin/releases/latest) 下载 `WB-Checkin-<版本>-universal.dmg`。本包**没有 Apple 开发者签名**，经浏览器下载后首次双击会提示「无法验证开发者」或「已损坏」。dmg 里带了一份「首次打开必看.txt」，三条路任选：
+
+1. 访达里按住 Control 点 App → 打开 → 再点一次「打开」
+2. 系统设置 → 隐私与安全性 → 页面下方点「仍要打开」
+3. 终端执行一次：
 
 ```bash
-sudo xattr -cr /Applications/WB-Checkin.app
+sudo xattr -dr com.apple.quarantine /Applications/WB-Checkin.app
 ```
 
 **macOS · 方式三：自己编译**（产物没有隔离属性，也就用不着签名）
 
-需要 Node 18+ 与 Rust 工具链。Intel 机器走这条：
+需要 Node 18+ 与 Rust 工具链。先把内置网关要用的 node 二进制取下来（100MB+，不进仓库）：
 
 ```bash
 git clone https://github.com/onlyveyou/wb-checkin.git && cd wb-checkin
-npm install && npm run app:build
-# Intel / 通用二进制：npm run app:build -- --target universal-apple-darwin
+npm install
+scripts/fetch-node.sh            # 通用包需要两份：arm64 与 x64
+npm run app:build -- --target universal-apple-darwin
 ```
 
 **Windows：安装包**
@@ -448,10 +453,11 @@ codesign --verify --deep --strict -vv /Applications/WB-Checkin.app
 
 ### 在 Intel Mac 上运行
 
-当前分发包是 **arm64 only**。要跑在 Intel 机器上，需构建通用二进制：
+分发包是通用二进制，Intel 机器直接装，不用另做处理。自己构建时注意一点：**内置网关要用的 node 是独立二进制，跟着机器架构走**。包里同时放了 `node`（arm64）与 `node-x64`（Intel），安装时按当前机器选一份解包；只放一份，另一类 Mac 上就会「网关永远不在线」。
 
 ```bash
 rustup target add x86_64-apple-darwin
+scripts/fetch-node.sh                              # 两份都下
 npm run app:build -- --target universal-apple-darwin
 ```
 
@@ -459,6 +465,7 @@ npm run app:build -- --target universal-apple-darwin
 
 ```bash
 npm install
+scripts/fetch-node.sh   # 内置网关的 node 二进制（不进仓库）；只出本机架构可加 --arm64 / --x64
 npm run app:build       # 产物在 src-tauri/target/release/bundle/
 ```
 

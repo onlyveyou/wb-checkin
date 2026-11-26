@@ -22,6 +22,7 @@ profiles/
 # 网关运行时二进制：mac 版本地打包用，Windows 版由 CI 现下（超过 GitHub 单文件上限）
 gateway-bundle/node
 gateway-bundle/node.exe
+gateway-bundle/node-x64
 gateway-bundle/.gateway.pid
 gateway-bundle/config.json.bak*
 

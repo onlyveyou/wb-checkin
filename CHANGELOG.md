@@ -7,6 +7,26 @@
 
 ## [未发布]
 
+## [0.14.7] - 2026-11-26
+
+### 新增
+
+- **macOS 分发包改为通用二进制**：同一份 dmg 在 Apple 芯片与 Intel 机器上都能装、都能跑，Intel 上不再提示「需要 Apple 芯片」。
+- 内置网关随包带两份 node（`node` = arm64、`node-x64` = Intel），安装时按当前机器架构挑一份解包，并用 `.node-arch` 记录，换架构会自动重拷。
+- `scripts/fetch-node.sh`：构建前一条命令取回网关要用的 node 二进制（100MB+，不进仓库）。
+- dmg 里附「首次打开必看.txt」，把 Gatekeeper 的三种放行方式写在用户眼前。
+
+### 变更
+
+- Windows 安装包内置 WebView2 引导程序（`embedBootstrapper`），不再依赖安装时现去微软取引导程序，减少「装完白屏」。
+
+### 修复
+
+- 机器上没有 Chrome / Edge 时，报错从一句「Chrome 不存在：/Applications/…」改成「请先安装 Google Chrome 或 Microsoft Edge」，并说明 Safari 不行。
+- 8901 端口被占用时，日志写明原因与各自平台的恢复动作（原来只有一行 EADDRINUSE）。
+- Windows 结束网关进程前先确认该 pid 仍是 `node.exe`，避免 pid 被系统复用后误杀用户自己的进程。
+- 包里缺少某个资源文件时跳过它，不再让整次网关安装失败（跨平台打包时 node / node.exe 本来就只存在一份）。
+
 ## [0.14.6] - 2026-11-26
 
 ### 新增

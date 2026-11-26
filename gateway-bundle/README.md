@@ -219,12 +219,22 @@ run.sh               macOS 启动包装（自动找 node、探测可执行性）
 README.md            本文件
 ```
 
+二进制（100MB+，不进仓库，构建前用 `scripts/fetch-node.sh` 取回）：
+
+```
+node                 macOS Apple 芯片版
+node-x64             macOS Intel 版 —— 通用包里两份都带，安装时按机器架构挑一份解包
+node.exe             Windows 版（CI 构建时下载）
+```
+
+`node` / `node-x64` 挑哪份由 `freehub.rs` 按 `cfg!(target_arch)` 决定，选错的表现是 node 一执行就退、网关永远不在线；解包目录里的 `.node-arch` 记录当前是哪个架构，换机器会自动重拷。
+
 运行时生成（不进仓库）：
 
 ```
-node / node.exe      运行时（Windows 版由 CI 构建时下载）
 run.cmd              Windows 手动启动入口
 .gateway.pid         进程号，重启按它精确杀进程
+.node-arch           已解包的 node 架构（aarch64 / x86_64）
 .bundle-version      app 写入的包版本，/health 的 version 取自它
 .inject-status.json  最近一次模型注入结果
 gateway.log          运行日志

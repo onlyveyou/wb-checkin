@@ -406,9 +406,19 @@ async function waitDebug(port, timeoutMs = 20000) {
   throw new Error('调试端口未起来：' + (last?.message || '超时'));
 }
 
+/** 浏览器是这套网页额度的前提：豆包按浏览器特征判风控，Safari 也没有 CDP。
+ *  缺浏览器时给一句人话，而不是把 Chromium 的 ENOENT 扔给用户。 */
+function requireBrowser() {
+  if (existsSync(CHROME)) return;
+  throw new Error(
+    '这台机器上没有 Chrome / Edge / Chromium。豆包网页额度必须用真实浏览器跑（Safari 不行），'
+    + '请先安装 Google Chrome 或 Microsoft Edge，装好后重试。',
+  );
+}
+
 /** 登录：独立可见 Chrome，用户扫码/登录后从 CDP 读 doubao.com cookie 与设备指纹 */
 async function doLogin() {
-  if (!existsSync(CHROME)) throw new Error(`Chrome 不存在：${CHROME}（可用 CHROME_PATH 指定）`);
+  requireBrowser();
   mkdirSync(PROFILE, { recursive: true });
   setLoginStatus('starting', { message: '正在启动浏览器…' });
   const child = spawn(CHROME, [
@@ -533,7 +543,7 @@ async function ensureBrowser() {
     cdp.close();
     return;
   } catch {}
-  if (!existsSync(CHROME)) throw new Error(`Chrome 不存在：${CHROME}`);
+  requireBrowser();
   mkdirSync(PROFILE, { recursive: true });
   browserChild = spawn(CHROME, [
     `--user-data-dir=${PROFILE}`,

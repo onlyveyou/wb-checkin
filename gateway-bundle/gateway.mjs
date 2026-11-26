@@ -1831,6 +1831,20 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// 端口占用的原因必须落到日志里：否则用户只看到面板「网关未运行」，
+// 而 stderr 里只有一句没人会去翻的 EADDRINUSE。
+server.on('error', (error) => {
+  if (error.code === 'EADDRINUSE') {
+    log('ERROR', `端口 ${PORT} 被占用，网关无法启动。可能还留着一个旧网关进程，或别的程序占了这个端口。`
+      + `macOS：launchctl kickstart -k gui/$(id -u)/ai.wbgateway.openrouter-free；`
+      + `Windows：重新打开 WB-Checkin（它会先清掉自己的旧进程）。`);
+  } else {
+    log('ERROR', `网关监听 ${BIND}:${PORT} 失败：${error.message}`);
+  }
+  try { rmSync(path.join(DIR, '.gateway.pid'), { force: true }); } catch {}
+  process.exit(1);
+});
+
 server.listen(PORT, BIND, () => {
   // Windows 上 app 靠这个 pid 精确杀掉自己的网关进程（taskkill /PID），
   // 不用 /IM node.exe —— 那会把用户自己跑的 node 一起杀掉。

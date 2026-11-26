@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "WB-Checkin",
-  "version": "0.14.6",
+  "version": "0.14.7",
   "identifier": "com.wbcheckin.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -51,6 +51,12 @@
     "macOS": {
       "minimumSystemVersion": "10.15",
       "signingIdentity": "1EDC82ED3DE8871B932801354DEC65CBECDBFB75"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      }
     }
   }
 }
