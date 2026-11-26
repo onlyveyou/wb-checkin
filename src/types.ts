@@ -556,3 +556,271 @@ export interface WbaiImportResult {
   restart?: string;
   error?: string;
 }
+
+// ---------------------------------------------------------------------------
+// 自定义模型（免费渠道）：数据来自本机网关 127.0.0.1:8901 的 /admin/api/state。
+// 字段口径与网关一致，前端不再二次解释。
+// ---------------------------------------------------------------------------
+
+export interface FreeHubProvider {
+  name: string;
+  title: string;
+  /** 网关内置目录里有的渠道（这些不给删，只给填 key） */
+  builtin: boolean;
+  endpoint: string;
+  proxyAddr: string;
+  keyPresent: boolean;
+  apiKeyMasked: string;
+  allowNoKey: boolean;
+  disabled: boolean;
+  note: string;
+  login?: string | null;
+  /** 免费额度一句话 */
+  quota: string;
+  /** 验证门槛：要不要手机 / 实名 / 绑卡 */
+  verify: "phone" | "realname" | "card" | "none";
+  /** 是否需要代理 */
+  network: string;
+  apply?: string | null;
+  models: string[];
+  modelLabels: Record<string, string>;
+  inTier: { ok: number; fail: number; cooling: number; active: number; cooldownLeftMs: number };
+  stats: { ok: number; fail: number };
+}
+
+export interface FreeHubState {
+  ok: boolean;
+  offline?: boolean;
+  message?: string;
+  tier?: string;
+  tiers?: string[];
+  queueSize?: number;
+  skipped?: number;
+  uptimeSec?: number;
+  providers?: FreeHubProvider[];
+  /** 三个网页额度平台的登录态（credential = 已经有可用凭据） */
+  orcaterm?: { credential?: boolean; uin?: string };
+  doubao?: { credential?: boolean; catalog?: unknown[] };
+  antigravity?: { credential?: boolean; email?: string };
+}
+
+export interface FreeHubTestResult {
+  ok: boolean;
+  code: number;
+  ms: number;
+  text: string;
+  error: string;
+  model: string;
+}
+
+/**
+ * 一键诊断：换台电脑不好用时，先看这四件事 ——
+ * 网关跑的是哪版脚本、models.json 写进去没有、三个平台登没登录、日志最后几行。
+ */
+export interface FreeHubDiagnostics {
+  appVersion: string;
+  /** WorkBuddy 在运行 → 注入完必须重启它，否则模型列表还是旧的 */
+  workbuddyRunning: boolean;
+  gateway: {
+    url: string;
+    online: boolean;
+    runningVersion: string | null;
+    bundleVersion: string;
+    uptimeSec: number | null;
+    queueSize: number | null;
+    skipped: number | null;
+    message: string | null;
+    nodeRunnable: boolean;
+  };
+  paths: {
+    dir: string;
+    config: string;
+    models: string;
+    modelsExists: boolean;
+    modelsCount: number;
+    plist: string;
+  };
+  providersWithKey: number;
+  inject: {
+    at?: number;
+    ok?: boolean;
+    message?: string;
+    modelsPath?: string;
+    modelsCount?: number;
+    appVersion?: string;
+  } | null;
+  platforms: {
+    orcaterm: { cookie: boolean; loggedIn: boolean | null };
+    doubao: { cookie: boolean; catalog: number; fallbackModels: number };
+    antigravity: { refreshToken: boolean; quota: unknown };
+  };
+  logs: { stderr: string; stdout: string; doubaoLogin: string; orcatermLogin: string };
+}
+
+/** OrcaTerm 免费模型：凭据在网关 config.json，这里只读状态、不持有 cookie。 */
+export interface OrcaTermState {
+  ok: boolean;
+  offline?: boolean;
+  message?: string;
+  credential: boolean;
+  uin: string;
+  models: string[];
+  injectSystem: string;
+  autoLock: boolean;
+  /** 网关侧累计成功/失败/冷却数（腾讯云没有额度查询接口，只能看用量） */
+  stats?: { ok?: number; fail?: number; cooling?: number; active?: number };
+  inject?: Partial<InjectEntry>;
+}
+
+export interface OrcaTermLoginStatus {
+  ok: boolean;
+  state: "idle" | "starting" | "waiting" | "success" | "error";
+  message: string;
+  uin: string;
+  credential: boolean;
+}
+
+/** 豆包网页额度：cookie 在网关 config.json，前端只读状态。 */
+/** 官方下发的单个模型（来自 /alice/slot/action_bar_v3/brief_list，动态变化） */
+export interface DoubaoModel {
+  id: string;
+  key: string;
+  name: string;
+  agentMode: number;
+  modeId: string;
+  need: number;
+  effort: number;
+  tag: string;
+  window: number;
+}
+
+export interface DoubaoState {
+  ok: boolean;
+  offline?: boolean;
+  message?: string;
+  credential: boolean;
+  checkedToday: boolean;
+  checkinState?: string;
+  lastCheckin: string;
+  models: string[];
+  /** 官方当前全部可选模型（面板按这份渲染，不再写死） */
+  catalog?: DoubaoModel[];
+  catalogAt?: number;
+  autoCheckin: boolean;
+  inject?: Partial<InjectEntry>;
+}
+
+export interface DoubaoQuotaGroup {
+  label: string;
+  total: number | null;
+  used: number | null;
+  remaining: number | null;
+  usedPercent: number | null;
+  expireAt: number;
+}
+
+export interface DoubaoUsage {
+  date: string;
+  calls: number;
+  chars: number;
+  models: Record<string, number>;
+  last: string;
+}
+
+export interface DoubaoQuota {
+  ok: boolean;
+  remaining: number;
+  plan: string;
+  exhausted: boolean;
+  groups: DoubaoQuotaGroup[];
+  usage: DoubaoUsage | null;
+  checkin: { date?: string; result?: string; message?: string; code?: number } | null;
+  detailUrl: string;
+  updatedAt: number;
+}
+
+export interface DoubaoLoginStatus {
+  ok: boolean;
+  state: "idle" | "starting" | "waiting" | "success" | "error";
+  message: string;
+  credential: boolean;
+  checkedToday: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// 注入开关：决定哪些模型出现在 WorkBuddy 模型列表里
+// ---------------------------------------------------------------------------
+
+export interface InjectEntry {
+  /** 平台开关：关掉就从 models.json 清掉该平台全部条目 */
+  enabled: boolean;
+  /** 「自动轮换」内部依次试哪些模型 */
+  rotate: string[];
+  /** 真正写进 WorkBuddy 的条目（auto + 勾选的单独模型） */
+  inject: string[];
+}
+
+export interface InjectConfig {
+  orcaterm?: InjectEntry;
+  doubao?: InjectEntry;
+  antigravity?: InjectEntry;
+  [key: string]: InjectEntry | undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Antigravity（Google Cloud Code Assist）
+// ---------------------------------------------------------------------------
+
+export interface AntigravityModel {
+  id: string;
+  label: string;
+  /** 0~1，null 表示接口没给 */
+  remaining: number | null;
+  resetAt: string;
+}
+
+export interface AntigravityQuotaBucket {
+  window: string;
+  remaining: number;
+  resetAt: string;
+}
+
+export interface AntigravityQuotaGroup {
+  label: string;
+  description: string;
+  buckets: AntigravityQuotaBucket[];
+}
+
+export interface AntigravityQuota {
+  ok: boolean;
+  login: boolean;
+  email: string;
+  project: string;
+  plan: string;
+  models: AntigravityModel[];
+  groups: AntigravityQuotaGroup[];
+  error?: string;
+  updatedAt: number;
+}
+
+export interface AntigravityState {
+  ok: boolean;
+  offline?: boolean;
+  message?: string;
+  credential: boolean;
+  email: string;
+  plan: string;
+  models: string[];
+  labels: Record<string, string>;
+  quotaAge: number;
+  inject: Partial<InjectEntry>;
+}
+
+export interface AntigravityLoginStatus {
+  ok: boolean;
+  state: "idle" | "starting" | "waiting" | "success" | "error";
+  message: string;
+  url?: string;
+  credential: boolean;
+  email: string;
+}

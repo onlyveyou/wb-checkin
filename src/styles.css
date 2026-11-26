@@ -339,6 +339,15 @@ select {
   color: var(--muted);
 }
 
+/* 选中态必须和未选中拉开差距：之前用 accent-soft 做底，跟默认底色几乎一样，
+   用户点完看不出有没有点上（「我点了单独，怎么没进去」多半就是这么来的） */
+.pill.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
 .pill.ok {
   background: var(--accent-soft);
   border-color: transparent;
@@ -823,6 +832,7 @@ select {
 
 .tabs {
   display: inline-flex;
+  flex-wrap: wrap;
   gap: 3px;
   padding: 3px;
   background: var(--surface-sunken);
@@ -2675,4 +2685,263 @@ body {
   font-size: 11px;
   line-height: 1.55;
   color: var(--faint);
+}
+
+/* ---------- 自定义模型（免费渠道） ---------- */
+
+/* 一行 = 一家平台：左边额度与门槛，右边动作。动作数比别的面板多，
+   所以单独放宽、并且允许在窄窗口下换行，别把按钮压成竖排。 */
+.fh-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fh-row:last-child {
+  border-bottom: none;
+}
+
+.fh-main {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.fh-main .row-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.fh-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: 8px;
+}
+
+.fh-actions {
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  max-width: 340px;
+}
+
+.fh-input {
+  width: 150px;
+  height: 28px;
+  padding: 0 9px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+}
+
+.fh-input:focus {
+  border-color: var(--accent);
+}
+
+.fh-mask {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--faint);
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 展开的编辑区：和上面的行同属一个区块，所以用底色区分，不再画分隔线 */
+.fh-editor {
+  background: var(--surface-sunken);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fh-grid2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.fh-textarea {
+  width: 100%;
+  padding: 7px 10px;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  outline: none;
+  resize: vertical;
+}
+
+.fh-textarea:focus {
+  border-color: var(--accent);
+}
+
+.fh-editor-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fh-editor-foot .btn.danger {
+  margin-left: auto;
+}
+
+/* 整页配置视图：列表让位，只留这一家 */
+.fh-pagehead {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fh-back {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  margin-top: 1px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.fh-back:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--surface-sunken);
+}
+
+.fh-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+}
+
+/* 表格式的关键信息：六格铺开，窄窗口折成三列再折两列 */
+.fh-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.fh-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 11px 16px;
+  background: var(--surface);
+  min-width: 0;
+}
+
+.fh-fact > span {
+  font-size: 11px;
+  color: var(--faint);
+  letter-spacing: 0.02em;
+}
+
+.fh-fact > b {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 配置页里的每一段：标题 + 说明 + 控件，段落之间用细线分 */
+.fh-block {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fh-block:last-of-type {
+  border-bottom: none;
+}
+
+.fh-block-head .row-hint {
+  margin-top: 3px;
+  max-width: 76ch;
+  line-height: 1.65;
+}
+
+.fh-block .field > label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.fh-block .field input,
+.fh-block .field textarea {
+  width: 100%;
+}
+
+.fh-block .field input {
+  height: 30px;
+}
+
+.fh-block .field .row-hint {
+  margin-top: 5px;
+  line-height: 1.6;
+}
+
+/* 行本身可点：进配置页。键盘可达，所以给 focus 描边而不是只靠 hover */
+.fh-row {
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.fh-row:hover {
+  background: var(--surface-sunken);
+}
+
+.fh-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+@media (max-width: 720px) {
+  .fh-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .fh-actions {
+    flex-wrap: wrap;
+  }
+}
+
+/* 诊断日志：只读一屏，别把整页撑开 */
+.diag-log {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-radius: 10px;
+  color: var(--muted);
+  background: rgba(127, 127, 127, 0.1);
 }

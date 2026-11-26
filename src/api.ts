@@ -15,6 +15,19 @@ import type {
   LogRecord,
   FerryLogTail,
   FerryStatus,
+  FreeHubDiagnostics,
+  FreeHubState,
+  FreeHubTestResult,
+  OrcaTermLoginStatus,
+  OrcaTermState,
+  DoubaoLoginStatus,
+  DoubaoQuota,
+  DoubaoState,
+  AntigravityLoginStatus,
+  AntigravityQuota,
+  AntigravityState,
+  InjectConfig,
+  InjectEntry,
   OAuthPoll,
   OAuthStart,
   PendingAccount,
@@ -304,3 +317,129 @@ export const wbaiSelection = (model: string, selected: boolean) =>
 export const wbaiImport = () => invoke<WbaiImportResult>("wbai_import");
 
 export const wbaiLogs = (lines = 120) => invoke<FerryLogTail>("wbai_logs", { lines });
+
+// ---------------------------------------------------------------------------
+// 自定义模型（免费渠道）—— 全部经 IPC 转到本机网关，前端不直接发 HTTP。
+// ---------------------------------------------------------------------------
+
+/** 渠道清单 + 网关状态。网关没起时返回 offline: true，不算错误。 */
+export const freehubState = () => invoke<FreeHubState>("freehub_state");
+
+/** patch 里只放要改的字段（apiKey / endpoint / proxy / note / models / disabled）。 */
+export const freehubSave = (name: string, patch: Record<string, unknown>, create = false) =>
+  invoke<{ ok: boolean; name: string; justActivated: boolean; queueSize: number }>(
+    "freehub_save",
+    { name, patch, create },
+  );
+
+export const freehubDelete = (name: string) =>
+  invoke<{ ok: boolean }>("freehub_delete", { name });
+
+export const freehubTier = (tier: string) =>
+  invoke<{ ok: boolean; tier: string; queueSize: number }>("freehub_tier", { tier });
+
+/** 真发一次请求量延迟；只回显结果，不写进网关记账。 */
+export const freehubTest = (name: string, model?: string) =>
+  invoke<FreeHubTestResult>("freehub_test", { name, model });
+
+/** 拉起网关（macOS 走 launchctl kickstart）。 */
+export const freehubStart = () => invoke<{ ok: boolean }>("freehub_start");
+
+/** 一键诊断：网关版本 / 注入结果 / 三平台登录态 / 日志尾部。 */
+export const freehubDiagnostics = () => invoke<FreeHubDiagnostics>("freehub_diagnostics");
+
+/** 在系统浏览器打开「申请 key」页。与 openLink 分开：那条只放行 workbuddy 站内地址。 */
+export const freehubOpen = (url: string) => invoke<void>("freehub_open", { url });
+
+// ---------------------------------------------------------------------------
+// OrcaTerm 免费模型 —— 全部经 IPC 转到本机网关，前端不碰 cookie、不发 HTTP。
+// 登录：网关拉独立浏览器扫码 → 写 config.json → 热重载；这里只触发 + 轮询进度。
+// ---------------------------------------------------------------------------
+
+export const orcatermState = () => invoke<OrcaTermState>("orcaterm_state");
+
+/** 把 7 个 OrcaTerm 模型写进 WorkBuddy（幂等；启动时已自动做过，这里供手动重试）。 */
+export const orcatermInjectModels = () => invoke<string>("orcaterm_inject_models");
+
+export const orcatermLogin = () => invoke<{ ok: boolean; already?: boolean; started?: boolean; message: string }>("orcaterm_login");
+
+export const orcatermLoginStatus = () => invoke<OrcaTermLoginStatus>("orcaterm_login_status");
+
+/** models 传数组或换行/逗号分隔的字符串都行（网关侧统一解析）。 */
+export const orcatermSave = (
+  models: string[] | string,
+  injectSystem?: string,
+  autoLock?: boolean,
+) =>
+  invoke<{ ok: boolean; models: string[]; injectSystem: string }>("orcaterm_save", {
+    models,
+    injectSystem: injectSystem ?? null,
+    autoLock: autoLock ?? null,
+  });
+
+export const orcatermTest = (model?: string) =>
+  invoke<FreeHubTestResult>("orcaterm_test", { model: model ?? null });
+
+/** 网关没起时拉起（复用自定义模型那套 LaunchAgent）。 */
+export const orcatermStart = () => invoke<{ ok: boolean }>("orcaterm_start");
+
+// ---------------------------------------------------------------------------
+// 豆包网页额度
+// ---------------------------------------------------------------------------
+
+export const doubaoState = () => invoke<DoubaoState>("doubao_state");
+
+export const doubaoLogin = () => invoke<{ ok: boolean; started?: boolean; message: string }>("doubao_login");
+
+export const doubaoLoginStatus = () => invoke<DoubaoLoginStatus>("doubao_login_status");
+
+export const doubaoCheckin = (force = false) =>
+  invoke<{
+    ok: boolean;
+    already?: boolean;
+    message: string;
+    days?: number;
+  }>("doubao_checkin", { force });
+
+export const doubaoSave = (models: string[] | string, autoCheckin?: boolean) =>
+  invoke<{ ok: boolean; models: string[]; autoCheckin: boolean }>("doubao_save", {
+    models,
+    autoCheckin: autoCheckin ?? null,
+  });
+
+export const doubaoQuota = () => invoke<DoubaoQuota>("doubao_quota");
+
+export const doubaoTest = (model?: string) =>
+  invoke<FreeHubTestResult>("doubao_test", { model: model ?? null });
+
+export const doubaoInjectModels = () => invoke<string>("doubao_inject_models");
+
+// ---------------------------------------------------------------------------
+// Antigravity（Google Cloud Code Assist）与注入开关
+// ---------------------------------------------------------------------------
+
+export const antigravityState = () => invoke<AntigravityState>("antigravity_state");
+
+export const antigravityLogin = () =>
+  invoke<{ ok: boolean; started?: boolean; message: string }>("antigravity_login");
+
+export const antigravityLoginStatus = () =>
+  invoke<AntigravityLoginStatus>("antigravity_login_status");
+
+export const antigravityQuota = (force = false) =>
+  invoke<AntigravityQuota>("antigravity_quota", { force });
+
+export const antigravitySave = (models: string[] | string) =>
+  invoke<{ ok: boolean; models: string[] }>("antigravity_save", { models });
+
+export const antigravityTest = (model?: string) =>
+  invoke<FreeHubTestResult>("antigravity_test", { model: model ?? null });
+
+export const freehubInjectModels = () => invoke<string>("freehub_inject_models");
+
+export const freehubInjectState = () => invoke<InjectConfig>("freehub_inject_state");
+
+export const freehubSetInject = (
+  provider: "orcaterm" | "doubao" | "antigravity",
+  patch: { enabled?: boolean; rotate?: string[]; inject?: string[] },
+) => invoke<{ ok: boolean; provider: string; inject: InjectEntry }>("freehub_set_inject", { provider, ...patch });

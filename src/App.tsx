@@ -21,7 +21,11 @@ import type {
 import AccountRow from "./components/AccountRow";
 import AddAccountDialog from "./components/AddAccountDialog";
 import FerryPanel from "./components/FerryPanel";
+import FreeHubPanel from "./components/FreeHubPanel";
 import LocalAiPanel from "./components/LocalAiPanel";
+import OrcaTermPanel from "./components/OrcaTermPanel";
+import DoubaoPanel from "./components/DoubaoPanel";
+import AntigravityPanel from "./components/AntigravityPanel";
 import WbaiPanel from "./components/WbaiPanel";
 import SwitchDialog from "./components/SwitchDialog";
 
@@ -120,7 +124,7 @@ const MENUBAR_OPTIONS: { key: string; label: string; hint: string }[] = [
   { key: "mem", label: "内存", hint: "已用物理内存比例，写作 MEM 61%" },
 ];
 
-type Tab = "checkin" | "ai" | "ferry" | "wbai";
+type Tab = "checkin" | "ai" | "ferry" | "wbai" | "freehub" | "orcaterm" | "doubao" | "antigravity";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("checkin");
@@ -759,6 +763,8 @@ export default function App() {
           </button>
         ) : tab === "ferry" ? (
           <span className="sub">可选功能 · 需要 Node 22+</span>
+        ) : tab === "freehub" ? (
+          <span className="sub">可选功能 · 需要本机网关</span>
         ) : (
           <span className="sub">可选功能 · 默认关闭</span>
         )}
@@ -793,9 +799,41 @@ export default function App() {
           >
             国际版摆渡
           </button>
+          <button
+            className={`tab${tab === "freehub" ? " on" : ""}`}
+            onClick={() => setTab("freehub")}
+          >
+            自定义模型
+          </button>
+          <button
+            className={`tab${tab === "orcaterm" ? " on" : ""}`}
+            onClick={() => setTab("orcaterm")}
+          >
+            OrcaTerm
+          </button>
+          <button
+            className={`tab${tab === "doubao" ? " on" : ""}`}
+            onClick={() => setTab("doubao")}
+          >
+            豆包
+          </button>
+          <button
+            className={`tab${tab === "antigravity" ? " on" : ""}`}
+            onClick={() => setTab("antigravity")}
+          >
+            Antigravity
+          </button>
         </div>
 
-        {tab === "ferry" ? (
+        {tab === "orcaterm" ? (
+          <OrcaTermPanel active={tab === "orcaterm"} onError={showError} />
+        ) : tab === "doubao" ? (
+          <DoubaoPanel active={tab === "doubao"} onError={showError} />
+        ) : tab === "antigravity" ? (
+          <AntigravityPanel active={tab === "antigravity"} onError={showError} />
+        ) : tab === "freehub" ? (
+          <FreeHubPanel active={tab === "freehub"} onError={showError} />
+        ) : tab === "ferry" ? (
           <FerryPanel active={tab === "ferry"} onError={showError} />
         ) : tab === "wbai" ? (
           <WbaiPanel active={tab === "wbai"} onError={showError} />

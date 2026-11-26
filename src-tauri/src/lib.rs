@@ -11,14 +11,18 @@ mod axdrive;
 #[cfg(not(target_os = "macos"))]
 #[path = "axdrive_windows.rs"]
 mod axdrive;
+mod antigravity;
 mod credits;
+mod doubao;
 mod ferry;
+mod freehub;
 mod growth;
 mod localai;
 mod logs;
 #[cfg(target_os = "macos")]
 mod menubar;
 mod oauth;
+mod orcaterm;
 mod paths;
 mod profile;
 mod store;
@@ -1035,6 +1039,240 @@ fn ferry_logs(lines: Option<usize>) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// 自定义模型（免费渠道）
+//
+// 渠道清单与 key 都在本机网关（127.0.0.1:8901）的 config.json 里，这里只是把它的
+// /admin/api/* 转成 IPC。网关没装/没起时 state() 回 offline，面板显示提示而不是报错。
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn freehub_state() -> Value {
+    freehub::state().await
+}
+
+#[tauri::command]
+async fn freehub_save(name: String, patch: Value, create: Option<bool>) -> Result<Value, String> {
+    freehub::save(&name, patch, create.unwrap_or(false)).await
+}
+
+#[tauri::command]
+async fn freehub_delete(name: String) -> Result<Value, String> {
+    freehub::remove(&name).await
+}
+
+#[tauri::command]
+async fn freehub_tier(tier: String) -> Result<Value, String> {
+    freehub::tier(&tier).await
+}
+
+#[tauri::command]
+async fn freehub_test(name: String, model: Option<String>) -> Result<Value, String> {
+    freehub::test(&name, model).await
+}
+
+/// 一键诊断：网关版本 / 注入结果 / 三平台登录态 / 日志尾部。面板复制用。
+#[tauri::command]
+async fn freehub_diagnostics() -> Value {
+    freehub::diagnostics().await
+}
+
+#[tauri::command]
+async fn freehub_start(app: tauri::AppHandle) -> Result<Value, String> {
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    freehub::start(&resource_dir).await
+}
+
+/// 登录类命令的统一兜底：网关没起、或跑着旧脚本（新接口 404）时自愈一次。
+///
+/// launchd 只在进程退出时重读脚本，覆盖文件不会让它重载 —— 升级后老进程里
+/// 没有新路由，用户看到的就是「点登录豆包报未知接口」。这里重启网关再试一遍。
+async fn gateway_retry<F, Fut>(app: &tauri::AppHandle, run: F) -> Result<Value, String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
+    let error = match run().await {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    let stale = error.contains("网关无响应")
+        || error.contains("未知接口")
+        || error.contains("不允许的网关路径");
+    if !stale {
+        return Err(error);
+    }
+    eprintln!("[freehub] 网关疑似旧进程或未启动（{error}），重启后重试");
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    if let Err(start_error) = freehub::start(&resource_dir).await {
+        return Err(format!("{error}；重启网关也失败：{start_error}"));
+    }
+    run().await
+}
+
+/// 「申请 key」直达各家平台的注册页。与 open_link 分开：那条只放行 workbuddy 站内地址。
+#[tauri::command]
+fn freehub_open(url: String) -> Result<(), String> {
+    freehub::open(&url)
+}
+
+// ---------------------------------------------------------------------------
+// OrcaTerm 免费模型
+//
+// 凭据唯一事实来源是网关 config.json（WorkBuddy 也读它），这里只把网关的
+// /admin/api/orcaterm/* 转成 IPC：登录由网关拉浏览器、进度由网关状态文件给，
+// 本应用不另存一份 cookie。网关没起时 state() 回 offline，面板显示提示。
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn orcaterm_state() -> Value {
+    orcaterm::state().await
+}
+
+/// 把 OrcaTerm 模型写进 WorkBuddy（面板按钮 + 启动时自动各调一次，幂等）。
+#[tauri::command]
+async fn orcaterm_inject_models() -> Result<String, String> {
+    freehub::inject_workbuddy_models()
+}
+
+#[tauri::command]
+async fn orcaterm_login(app: tauri::AppHandle) -> Result<Value, String> {
+    gateway_retry(&app, || orcaterm::login()).await
+}
+
+#[tauri::command]
+async fn orcaterm_login_status() -> Value {
+    orcaterm::login_status().await
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn orcaterm_save(
+    models: Value,
+    injectSystem: Option<String>,
+    autoLock: Option<bool>,
+) -> Result<Value, String> {
+    orcaterm::save(models, injectSystem, autoLock).await
+}
+
+#[tauri::command]
+async fn orcaterm_test(model: Option<String>) -> Result<Value, String> {
+    orcaterm::test(model).await
+}
+
+// ---------------------------------------------------------------------------
+// 豆包网页额度：登录取 cookie、每日签到、模型配置都转发给本机网关
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn doubao_state() -> Value {
+    doubao::state().await
+}
+
+#[tauri::command]
+async fn doubao_login(app: tauri::AppHandle) -> Result<Value, String> {
+    gateway_retry(&app, || doubao::login()).await
+}
+
+#[tauri::command]
+async fn doubao_login_status() -> Value {
+    doubao::login_status().await
+}
+
+#[tauri::command]
+async fn doubao_checkin(force: Option<bool>) -> Result<Value, String> {
+    doubao::checkin(force).await
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn doubao_save(models: Value, autoCheckin: Option<bool>) -> Result<Value, String> {
+    doubao::save(models, autoCheckin).await
+}
+
+#[tauri::command]
+async fn doubao_quota() -> Result<Value, String> {
+    doubao::quota().await
+}
+
+#[tauri::command]
+async fn doubao_test(model: Option<String>) -> Result<Value, String> {
+    doubao::test(model).await
+}
+
+/// 面板「重新配置」：和 app 启动时一样，把三个平台的模型覆盖式写进 WorkBuddy。
+#[tauri::command]
+async fn doubao_inject_models() -> Result<String, String> {
+    freehub::inject_workbuddy_models()
+}
+
+// ---------------------------------------------------------------------------
+// Antigravity（Google Cloud Code Assist）：OAuth 反代，额度与模型走网关
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn antigravity_state() -> Value {
+    antigravity::state().await
+}
+
+#[tauri::command]
+async fn antigravity_login() -> Result<Value, String> {
+    antigravity::login().await
+}
+
+#[tauri::command]
+async fn antigravity_login_status() -> Value {
+    antigravity::login_status().await
+}
+
+#[tauri::command]
+async fn antigravity_quota(force: Option<bool>) -> Result<Value, String> {
+    antigravity::quota(force).await
+}
+
+#[tauri::command]
+async fn antigravity_save(models: Value) -> Result<Value, String> {
+    antigravity::save(models).await
+}
+
+#[tauri::command]
+async fn antigravity_test(model: Option<String>) -> Result<Value, String> {
+    antigravity::test(model).await
+}
+
+// ---------------------------------------------------------------------------
+// 注入开关：决定哪些模型出现在 WorkBuddy 的模型列表里
+// ---------------------------------------------------------------------------
+
+/// 通用「重新配置」：三个平台一起覆盖写。前端任何面板保存开关后都调它。
+#[tauri::command]
+async fn freehub_inject_models() -> Result<String, String> {
+    freehub::inject_workbuddy_models()
+}
+
+#[tauri::command]
+async fn freehub_inject_state() -> Value {
+    freehub::inject_state().await
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn freehub_set_inject(
+    provider: String,
+    enabled: Option<bool>,
+    rotate: Option<Value>,
+    inject: Option<Value>,
+) -> Result<Value, String> {
+    freehub::set_inject(&provider, enabled, rotate, inject).await
+}
+
+/// 网关没起时由面板调用。复用 freehub 的 launchctl 拉起逻辑（同一个 LaunchAgent）。
+#[tauri::command]
+async fn orcaterm_start(app: tauri::AppHandle) -> Result<Value, String> {
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    freehub::start(&resource_dir).await
+}
+
+// ---------------------------------------------------------------------------
 // 国际版摆渡
 //
 // 与 ferry 同一套交互：登录走「申请 state → 系统浏览器打开 → 前端轮询」，服务起停走 IPC。
@@ -1525,6 +1763,11 @@ pub fn run() {
             ferry::autostart_on_launch();
             // 国际版摆渡同理：开过才拉起，且必须有已保存的登录态才会真的起。
             wbai::autostart_on_launch();
+            // 内置网关：首次启动解包脚本+node 并注册 LaunchAgent（后台线程，避免 108MB 拷贝卡界面）。
+            // 已装过则只补差异脚本 + 按当前 $HOME 重写 plist，不覆盖用户自己的 config。
+            if let Ok(resource_dir) = app.handle().path().resource_dir() {
+                std::thread::spawn(move || freehub::bootstrap_on_launch(&resource_dir));
+            }
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -1594,6 +1837,38 @@ pub fn run() {
             ferry_stop,
             ferry_probe,
             ferry_refresh,
+            freehub_state,
+            freehub_save,
+            freehub_delete,
+            freehub_tier,
+            freehub_test,
+            freehub_start,
+            freehub_diagnostics,
+            freehub_open,
+            orcaterm_inject_models,
+            orcaterm_state,
+            orcaterm_login,
+            orcaterm_login_status,
+            orcaterm_save,
+            orcaterm_test,
+            orcaterm_start,
+            doubao_state,
+            doubao_login,
+            doubao_login_status,
+            doubao_checkin,
+            doubao_save,
+            doubao_quota,
+            doubao_test,
+            doubao_inject_models,
+            antigravity_state,
+            antigravity_login,
+            antigravity_login_status,
+            antigravity_quota,
+            antigravity_save,
+            antigravity_test,
+            freehub_inject_models,
+            freehub_inject_state,
+            freehub_set_inject,
             ferry_import,
             ferry_selection,
             ferry_set_proxy,

@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>自定义模型 · 免费渠道配置</title>
+<style>
+  :root{
+    --bg:#faf7ef; --card:#fffefb; --line:#e4ddca; --line-soft:#efe9d9;
+    --ink:#1d1c18; --muted:#7c7566; --green:#0e5a46; --green-soft:#e7efe9;
+    --amber:#8a5a00; --amber-soft:#fdf3dc; --red:#9c2b1f; --red-soft:#fbeae7;
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:28px 22px 80px}
+
+  /* 顶部：标题 + 状态 */
+  .top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px}
+  h1{font-size:19px;margin:0 0 4px;letter-spacing:.2px}
+  .sub{color:var(--muted);font-size:12.5px}
+  .status{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+  .badge{
+    display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;
+    border:1px solid var(--line);background:var(--card);font-size:12px;color:var(--muted);white-space:nowrap
+  }
+  .badge b{color:var(--ink);font-weight:600}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--green)}
+  .dot.off{background:var(--red)}
+
+  /* 分段切换（对齐 WB-Checkin 的胶囊样式） */
+  .segbar{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 22px}
+  .seg{
+    border:1px solid var(--line);background:transparent;color:var(--ink);
+    padding:7px 16px;border-radius:999px;font-size:13px;cursor:pointer;transition:.15s;
+    font-family:inherit
+  }
+  .seg:hover{border-color:#cfc6ae}
+  .seg.on{background:var(--green);border-color:var(--green);color:#fff;font-weight:500}
+  .seg small{opacity:.62;margin-left:5px;font-size:11px}
+
+  /* 卡片 */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-bottom:22px}
+  .card > h2{
+    font-size:13px;margin:0;padding:13px 16px;border-bottom:1px solid var(--line-soft);
+    display:flex;align-items:center;justify-content:space-between;font-weight:600
+  }
+  .card > h2 span{font-weight:400;color:var(--muted);font-size:12px}
+
+  /* 表格 */
+  table{width:100%;border-collapse:collapse}
+  th{
+    text-align:left;font-size:11.5px;color:var(--muted);font-weight:500;
+    padding:9px 12px;border-bottom:1px solid var(--line-soft);background:#fdfbf5;white-space:nowrap
+  }
+  td{padding:11px 12px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  tr.dead td{opacity:.55}
+  .pname{font-weight:600;font-size:13.5px}
+  .pname em{font-style:normal;font-size:11px;color:var(--muted);display:block;font-weight:400;margin-top:2px}
+  .quota{font-size:12.5px}
+  .quota i{font-style:normal;color:var(--muted);display:block;font-size:11.5px;margin-top:2px}
+  .tag{display:inline-block;padding:1.5px 7px;border-radius:5px;font-size:11px;margin:0 3px 3px 0;white-space:nowrap}
+  .tag.phone{background:var(--amber-soft);color:var(--amber)}
+  .tag.realname{background:var(--amber-soft);color:var(--amber)}
+  .tag.card{background:var(--red-soft);color:var(--red)}
+  .tag.none{background:var(--green-soft);color:var(--green)}
+  .tag.ok{background:var(--green-soft);color:var(--green)}
+  .tag.net{background:#eef1f5;color:#4a5568}
+  .tag.warn{background:var(--red-soft);color:var(--red)}
+
+  input[type=text],input[type=password],textarea{
+    width:100%;font:inherit;font-size:12.5px;color:var(--ink);background:#fff;
+    border:1px solid var(--line);border-radius:9px;padding:6px 9px;outline:none
+  }
+  input:focus,textarea:focus{border-color:var(--green);box-shadow:0 0 0 3px rgba(14,90,70,.07)}
+  textarea{resize:vertical;min-height:64px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5}
+  .keyrow{display:flex;gap:6px;align-items:center;min-width:190px}
+
+  button{font-family:inherit;cursor:pointer}
+  .btn{
+    border:1px solid var(--line);background:var(--card);color:var(--ink);
+    padding:6px 12px;border-radius:9px;font-size:12.5px;white-space:nowrap;transition:.15s
+  }
+  .btn:hover{border-color:#cfc6ae;background:#fdfbf5}
+  .btn.primary{background:var(--green);border-color:var(--green);color:#fff}
+  .btn.primary:hover{background:#0b4a3a;border-color:#0b4a3a}
+  .btn.ghost{border-color:transparent;color:var(--muted);padding:6px 8px}
+  .btn.ghost:hover{color:var(--ink);background:#f4f0e4}
+  .btn:disabled{opacity:.45;cursor:default}
+  .ops{display:flex;gap:5px;flex-wrap:nowrap}
+  .ops .btn{padding:6px 10px;font-size:12px}
+
+  /* 表单 */
+  .form{padding:16px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+  .form .full{grid-column:1/-1}
+  label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
+  .hint{font-size:11.5px;color:var(--muted);margin-top:4px}
+  .foot{padding:0 16px 16px;display:flex;gap:9px;align-items:center}
+
+  /* 弹层 */
+  .mask{position:fixed;inset:0;background:rgba(29,28,24,.32);display:none;align-items:center;justify-content:center;padding:20px;z-index:50}
+  .mask.on{display:flex}
+  .modal{background:var(--card);border-radius:16px;width:min(620px,100%);max-height:86vh;overflow:auto;box-shadow:0 18px 60px rgba(0,0,0,.18)}
+  .modal h3{margin:0;padding:16px 18px;font-size:15px;border-bottom:1px solid var(--line-soft)}
+
+  /* toast */
+  #toast{
+    position:fixed;left:50%;bottom:26px;transform:translate(-50%,14px);
+    background:#1d1c18;color:#fff;padding:10px 18px;border-radius:11px;font-size:13px;
+    opacity:0;pointer-events:none;transition:.22s;z-index:99;max-width:80vw
+  }
+  #toast.on{opacity:1;transform:translate(-50%,0)}
+  #toast.err{background:#9c2b1f}
+
+  .empty{padding:22px 16px;color:var(--muted);font-size:12.5px}
+  @media(max-width:820px){
+    .form{grid-template-columns:1fr}
+    th:nth-child(3),td:nth-child(3){display:none}
+    .wrap{padding:20px 14px 70px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="top">
+    <div>
+      <h1>自定义模型 · 免费渠道</h1>
+      <div class="sub">网关 <code id="ep">127.0.0.1:8901</code> · 本页改动直接写回 config.json，热重载生效</div>
+    </div>
+    <div class="status">
+      <span class="badge"><span class="dot" id="live"></span><span id="liveTxt">检查中</span></span>
+      <span class="badge">队列 <b id="qsize">-</b> · 跳过 <b id="qskip">-</b></span>
+      <span class="badge">运行 <b id="uptime">-</b></span>
+    </div>
+  </div>
+
+  <div class="segbar" id="tiers"></div>
+
+  <div class="card">
+    <h2>渠道清单 <span id="cnt"></span></h2>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:142px">平台</th>
+          <th style="width:228px">免费额度</th>
+          <th style="width:124px">验证要求</th>
+          <th>API Key</th>
+          <th style="width:126px">状态</th>
+          <th style="width:196px">操作</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <div class="card" id="orcaCard">
+    <h2>OrcaTerm 免费模型 <span>点名 <code>orcaterm/auto</code> 自动轮换，或 <code>orcaterm/模型名</code> 固定</span></h2>
+    <div class="form">
+      <div class="full">
+        <label>登录状态</label>
+        <div id="orcaCred" class="hint">检查中…</div>
+      </div>
+      <div class="full">
+        <label>auto 轮换的模型列表（每行一个，自动按冷却/失败降级）</label>
+        <textarea id="orcaModels" placeholder="glm-5.3&#10;kimi-k3&#10;deepseek-v4-pro"></textarea>
+        <div class="hint">WorkBuddy 里选 <code>OrcaTerm · 自动轮换</code> 即按此列表轮换；改完点保存热重载生效。</div>
+      </div>
+      <div class="full">
+        <label>人设注入（压过上游「运维助手」人设，留空则不注入）</label>
+        <textarea id="orcaInject" rows="3"></textarea>
+      </div>
+    </div>
+    <div class="foot">
+      <button class="btn primary" id="orcaSave">保存 OrcaTerm 配置</button>
+      <span class="hint" style="margin:0">凭据由 <code>orcaterm_auth.mjs</code> 扫码登录写入，不在此处填写</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>新增自定义渠道 <span>填好保存即入队，无需改代码</span></h2>
+    <form class="form" id="addForm" autocomplete="off">
+      <div>
+        <label>渠道标识（英文）</label>
+        <input type="text" name="name" placeholder="如 moonshot" required pattern="[a-z0-9_-]+">
+        <div class="hint">用作模型前缀，如 <code>moonshot::kimi-k2</code></div>
+      </div>
+      <div>
+        <label>Endpoint（OpenAI 兼容，完整路径）</label>
+        <input type="text" name="endpoint" placeholder="https://api.example.com/v1/chat/completions" required>
+      </div>
+      <div>
+        <label>API Key</label>
+        <input type="password" name="apiKey" placeholder="留空则该渠道不启用">
+      </div>
+      <div>
+        <label>代理（可选）</label>
+        <input type="text" name="proxy" placeholder="http://127.0.0.1:10808">
+      </div>
+      <div class="full">
+        <label>模型 ID（每行一个，可用 <code>模型名 | 显示名</code>）</label>
+        <textarea name="models" placeholder="kimi-k3.1-pro | Kimi K3.1 Pro&#10;glm-5.3-flash"></textarea>
+      </div>
+      <div class="full">
+        <label>备注（额度 / 验证说明，显示在清单里）</label>
+        <input type="text" name="note" placeholder="每天 2000 次；需手机实名">
+      </div>
+    </form>
+    <div class="foot">
+      <button class="btn primary" id="addBtn">保存并加入队列</button>
+      <span class="hint" style="margin:0">新渠道的模型会自动加入 <code>all</code> 分组和当前分组</span>
+    </div>
+  </div>
+
+</div>
+
+<div class="mask" id="mask">
+  <div class="modal">
+    <h3 id="mTitle">编辑渠道</h3>
+    <div id="orcaModalHint" style="display:none;padding:9px 11px;margin-bottom:12px;border-radius:7px;background:var(--amber-soft);color:var(--amber);font-size:12px;line-height:1.6"></div>
+    <form class="form" id="mForm" autocomplete="off">
+      <input type="hidden" name="name">
+      <div>
+        <label>Endpoint</label>
+        <input type="text" name="endpoint">
+      </div>
+      <div>
+        <label>代理</label>
+        <input type="text" name="proxy" placeholder="留空为直连">
+      </div>
+      <div class="full">
+        <label>API Key（留空 = 不修改）</label>
+        <input type="password" name="apiKey" placeholder="sk-...">
+      </div>
+      <div class="full">
+        <label>模型 ID（每行一个）</label>
+        <textarea name="models"></textarea>
+      </div>
+      <div class="full">
+        <label>备注</label>
+        <input type="text" name="note">
+      </div>
+    </form>
+    <div class="foot">
+      <button class="btn primary" id="mSave">保存</button>
+      <button class="btn" id="mCancel">取消</button>
+      <button class="btn ghost" id="mDelete" style="margin-left:auto;color:var(--red)">删除渠道</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let STATE = null;
+let dirty = new Set();   // 输入过但未保存的 key 输入框，重绘时避免覆盖
+
+function toast(msg, isErr) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'on' + (isErr ? ' err' : '');
+  clearTimeout(t._t);
+  t._t = setTimeout(() => { t.className = isErr ? 'err' : ''; }, 2600);
+}
+
+async function api(pathname, body) {
+  const r = await fetch(pathname, body ? {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  } : undefined);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+function human(ms) {
+  if (ms == null) return '-';
+  if (ms < 1000) return Math.round(ms) + 'ms';
+  if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+  return Math.round(ms / 60000) + 'min';
+}
+
+function renderTiers() {
+  const box = $('#tiers');
+  box.innerHTML = '';
+  const labels = { high: '高质量', standard: '标准', all: '全部' };
+  for (const t of STATE.tiers) {
+    const b = document.createElement('button');
+    b.className = 'seg' + (t === STATE.tier ? ' on' : '');
+    b.innerHTML = (labels[t] || t) + ' <small>' + t + '</small>';
+    b.onclick = async () => {
+      if (t === STATE.tier) return;
+      try { await api('admin/api/tier', { tier: t }); toast('已切到「' + t + '」'); await load(); }
+      catch (e) { toast(e.message, true); }
+    };
+    box.appendChild(b);
+  }
+}
+
+function tag(text, cls) { return '<span class="tag ' + cls + '">' + text + '</span>'; }
+
+function renderRows() {
+  const tb = $('#rows');
+  tb.innerHTML = '';
+  const list = STATE.providers;
+  $('#cnt').textContent = list.length + ' 家 · 有 key ' + list.filter(p => p.keyPresent).length + ' 家';
+  for (const p of list) {
+    const tr = document.createElement('tr');
+    const dead = p.disabled || (!p.keyPresent && !p.allowNoKey);
+    if (p.disabled) tr.className = 'dead';
+
+    // 状态
+    let st;
+    if (p.disabled) st = tag('已停用', 'warn');
+    else if (!p.keyPresent && !p.allowNoKey) st = tag('缺 key', 'card');
+    else if (p.inTier.active > 0) st = tag('队列中 ' + p.inTier.active, 'none');
+    else st = tag('未分组', 'net');
+    if (p.inTier.cooling > 0) st += tag('冷却 ' + p.inTier.cooling, 'warn');
+    if (p.stats && p.stats.ok) st += tag('✓' + p.stats.ok, 'none');
+    if (p.stats && p.stats.fail) st += tag('✗' + p.stats.fail, 'warn');
+
+    // OrcaTerm 登录状态：直接标在渠道行上，不用去别处找
+    if (p.name === 'orcaterm') {
+      const oc = STATE.orcaterm || {};
+      st = (oc.credential
+        ? tag('🟢 已登录', 'none')
+        : tag('🔴 未登录', 'card')) + st;
+    }
+
+    // 验证要求
+    const vmap = { phone: ['需手机', 'phone'], realname: ['需实名', 'realname'], card: ['需绑卡', 'card'], none: ['无需', 'none'] };
+    const v = vmap[p.verify] || vmap.none;
+    let verifyHtml = tag(v[0], v[1]);
+    if (p.network) verifyHtml += tag(p.network, 'net');
+
+    const isOrca = p.name === 'orcaterm';
+    const orcaNoLogin = isOrca && !(STATE.orcaterm || {}).credential;
+    tr.innerHTML =
+      '<td><div class="pname">' + p.title + '<em>' + p.name + '</em></div></td>' +
+      '<td><div class="quota">' + (orcaNoLogin
+        ? '<span style="color:var(--red)">未登录 · 点右侧「登录」按钮扫码，凭据自动保存</span>'
+        : (p.quota || p.note || '-')) + (p.apply ? '<i><a href="' + p.apply + '" target="_blank" style="color:var(--green)">申请 key ↗</a></i>' : '') + '</div></td>' +
+      '<td>' + verifyHtml + '</td>' +
+      '<td></td>' +
+      '<td>' + st + '</td>' +
+      '<td><div class="ops">' +
+        (isOrca ? '<button class="btn primary" data-act="orcalogin" style="background:var(--green);color:#fff">' + ((STATE.orcaterm || {}).credential ? '重新登录' : '登录') + '</button>' : '') +
+        '<button class="btn ghost" data-act="test">测试</button>' +
+        '<button class="btn ghost" data-act="edit">编辑</button>' +
+        '<button class="btn ghost" data-act="toggle">' + (p.disabled ? '启用' : '停用') + '</button>' +
+      '</div></td>';
+
+    // key 输入（独立构造，避免注入）
+    const cell = tr.children[3];
+    const row = document.createElement('div');
+    row.className = 'keyrow';
+    const inp = document.createElement('input');
+    inp.type = 'password';
+    inp.placeholder = p.keyPresent ? p.apiKeyMasked : '未填写';
+    if (dirty.has(p.name) && inp.value === '') inp.value = KEYCACHE[p.name] || '';
+    inp.oninput = () => { KEYCACHE[p.name] = inp.value; dirty.add(p.name); };
+    const save = document.createElement('button');
+    save.className = 'btn primary';
+    save.textContent = '保存';
+    save.onclick = async () => {
+      const v = inp.value.trim();
+      if (!v) return toast('请先填 key', true);
+      try {
+        await api('admin/api/provider', { name: p.name, patch: { apiKey: v, disabled: false } });
+        dirty.delete(p.name); delete KEYCACHE[p.name];
+        toast(p.title + ' 已保存，已入队');
+        await load();
+      } catch (e) { toast(e.message, true); }
+    };
+    row.appendChild(inp); row.appendChild(save);
+    cell.appendChild(row);
+
+    tr.querySelector('[data-act=test]').onclick = async (ev) => {
+      const b = ev.target; b.disabled = true; b.textContent = '测试中';
+      try {
+        const r = await api('admin/api/test', { name: p.name });
+        toast(r.ok ? (p.title + ' · ' + r.ms + 'ms · ' + r.text) : (p.title + ' 失败：' + r.error), !r.ok);
+      } catch (e) { toast(e.message, true); }
+      b.disabled = false; b.textContent = '测试';
+    };
+    tr.querySelector('[data-act=toggle]').onclick = async () => {
+      try {
+        await api('admin/api/provider', { name: p.name, patch: { disabled: !p.disabled } });
+        toast(p.title + (p.disabled ? ' 已启用' : ' 已停用'));
+        await load();
+      } catch (e) { toast(e.message, true); }
+    };
+    tr.querySelector('[data-act=edit]').onclick = () => openModal(p);
+
+    const olBtn = tr.querySelector('[data-act=orcalogin]');
+    if (olBtn) olBtn.onclick = async (ev) => {
+      const b = ev.target;
+      if (b.disabled) return;
+      b.disabled = true;
+      try {
+        const r = await api('admin/api/orcaterm/login', {});
+        if (r.already) { toast('已经登录了'); await load(); return; }
+        b.textContent = '等待扫码…';
+        toast('浏览器已弹出，请扫码登录腾讯云');
+        // 轮询登录进度，每 2 秒一次，最多 5 分钟
+        let tries = 0;
+        const timer = setInterval(async () => {
+          try {
+            const s = await api('admin/api/orcaterm/loginStatus', {});
+            if (s.state === 'success' && s.credential) {
+              clearInterval(timer);
+              toast('✅ 登录成功，cookie 已自动保存');
+              await load();
+            } else if (s.state === 'error') {
+              clearInterval(timer);
+              toast('登录失败：' + (s.message || '未知错误'), true);
+              b.disabled = false; b.textContent = '登录';
+            } else if (++tries > 150) {
+              clearInterval(timer);
+              toast('登录超时，请重试', true);
+              b.disabled = false; b.textContent = '登录';
+            }
+          } catch (e) { /* 轮询失败继续等 */ }
+        }, 2000);
+      } catch (e) { toast(e.message, true); b.disabled = false; b.textContent = '登录'; }
+    };
+
+    tb.appendChild(tr);
+  }
+}
+
+const KEYCACHE = {};
+
+function openModal(p) {
+  const f = $('#mForm');
+  $('#mTitle').textContent = '编辑 · ' + p.title;
+  // OrcaTerm 专用提示：模型列表不在本弹层改，且未登录要标明
+  const oh = $('#orcaModalHint');
+  if (p.name === 'orcaterm') {
+    const oc = STATE.orcaterm || {};
+    const n = (oc.models || []).length;
+    oh.style.display = '';
+    oh.innerHTML = (oc.credential
+        ? '<b style="color:var(--green)">🟢 OrcaTerm 已登录</b>'
+        : '<b>🔴 OrcaTerm 未登录</b> —— 用 OrcaTerm 模型会直接报 401，请在 WB-Checkin 软件「OrcaTerm」标签里扫码登录')
+      + '<br>模型列表在列表页顶部的「OrcaTerm 免费模型」卡片里改（当前 <b>' + n + '</b> 个），不在这里。'
+      + ' 本弹层改 Endpoint/代理只影响连接；<code>auto</code> 轮换请用 <code>orcaterm/auto</code>。';
+  } else {
+    oh.style.display = 'none';
+    oh.innerHTML = '';
+  }
+  f.name.value = p.name;
+  f.endpoint.value = p.endpoint || '';
+  f.proxy.value = p.proxyAddr || '';
+  f.apiKey.value = '';
+  f.apiKey.placeholder = p.keyPresent ? p.apiKeyMasked : '未填写';
+  f.models.value = (p.models || []).map(m => m === p.modelLabels?.[m] ? m : (p.modelLabels?.[m] ? m + ' | ' + p.modelLabels[m] : m)).join('\n');
+  f.note.value = p.note || '';
+  $('#mDelete').style.display = p.builtin ? 'none' : '';
+  $('#mask').classList.add('on');
+}
+
+async function saveModal() {
+  const f = $('#mForm');
+  const patch = {
+    endpoint: f.endpoint.value.trim(),
+    proxy: f.proxy.value.trim(),
+    note: f.note.value.trim(),
+    models: f.models.value.split('\n').map(s => s.trim()).filter(Boolean)
+  };
+  if (f.apiKey.value.trim()) patch.apiKey = f.apiKey.value.trim();
+  try {
+    await api('admin/api/provider', { name: f.name.value, patch });
+    $('#mask').classList.remove('on');
+    toast('已保存');
+    await load();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function load() {
+  try {
+    const s = await api('admin/api/state');
+    STATE = s;
+    $('#live').className = 'dot';
+    $('#liveTxt').textContent = '运行中';
+    $('#qsize').textContent = s.queueSize;
+    $('#qskip').textContent = s.skipped;
+    $('#uptime').textContent = s.uptimeSec > 3600 ? (s.uptimeSec / 3600).toFixed(1) + 'h' : Math.round(s.uptimeSec / 60) + 'min';
+    renderTiers();
+    renderRows();
+    // OrcaTerm 配置区
+    const oc = s.orcaterm || {};
+    if ($('#orcaModels')) {
+      $('#orcaModels').value = (oc.models || []).join('\n');
+      $('#orcaInject').value = oc.injectSystem || '';
+      $('#orcaCred').innerHTML = oc.credential
+        ? '<span class="tag ok">已登录</span> uin=' + (oc.uin || '?') + ' · 可正常使用 OrcaTerm 模型'
+        : '<span class="tag warn">未登录</span> 请在 WB-Checkin 软件「OrcaTerm」标签里扫码登录登录';
+    }
+  } catch (e) {
+    $('#live').className = 'dot off';
+    $('#liveTxt').textContent = '网关无响应';
+    toast('连不上网关：' + e.message, true);
+  }
+}
+
+$('#orcaSave').onclick = async () => {
+  const models = $('#orcaModels').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!models.length) return toast('至少填一个模型', true);
+  try {
+    await api('admin/api/orcaterm', {
+      models,
+      injectSystem: $('#orcaInject').value,
+      autoLock: true,
+    });
+    toast('OrcaTerm 配置已保存：' + models.length + ' 个模型');
+    await load();
+  } catch (e) { toast(e.message, true); }
+};
+
+$('#addBtn').onclick = async () => {
+  const f = $('#addForm');
+  const name = f.name.value.trim();
+  if (!name || !f.endpoint.value.trim()) return toast('渠道标识和 Endpoint 必填', true);
+  const models = f.models.value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!models.length) return toast('至少填一个模型 ID', true);
+  try {
+    await api('admin/api/provider', {
+      name,
+      create: true,
+      patch: {
+        endpoint: f.endpoint.value.trim(),
+        apiKey: f.apiKey.value.trim(),
+        proxy: f.proxy.value.trim(),
+        note: f.note.value.trim(),
+        models
+      }
+    });
+    f.reset();
+    toast('已新增 ' + name + '，模型已入队');
+    await load();
+  } catch (e) { toast(e.message, true); }
+};
+
+$('#mSave').onclick = saveModal;
+$('#mCancel').onclick = () => $('#mask').classList.remove('on');
+$('#mask').onclick = e => { if (e.target === $('#mask')) $('#mask').classList.remove('on'); };
+$('#mDelete').onclick = async () => {
+  const name = $('#mForm').name.value;
+  if (!confirm('删除渠道 ' + name + '？其模型会一并从分组移除。')) return;
+  try {
+    await api('admin/api/delete', { name });
+    $('#mask').classList.remove('on');
+    toast('已删除');
+    await load();
+  } catch (e) { toast(e.message, true); }
+};
+
+load();
+setInterval(() => { if (!document.hidden) load(); }, 15000);
+</script>
+</body>
+</html>

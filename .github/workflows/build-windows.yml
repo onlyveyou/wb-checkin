@@ -35,6 +35,16 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
+      # 内置网关是 node 脚本，Windows 上要 node.exe 才能跑；这个二进制不进仓库（100MB 超过
+      # GitHub 单文件上限），构建时现下。版本与 macOS 包里那份保持一致。
+      - name: Fetch Windows node for the builtin gateway
+        shell: pwsh
+        run: |
+          $v = "v22.22.2"
+          New-Item -ItemType Directory -Force gateway-bundle | Out-Null
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/$v/win-x64/node.exe" -OutFile gateway-bundle/node.exe
+          Get-Item gateway-bundle/node.exe | Select-Object Length
+
       - name: Build NSIS installer
         run: npx tauri build --bundles nsis
 

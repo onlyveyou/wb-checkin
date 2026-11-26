@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "WB-Checkin",
-  "version": "0.10.9",
+  "version": "0.14.4",
   "identifier": "com.wbcheckin.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -38,7 +38,8 @@
       "dmg"
     ],
     "resources": {
-      "../sidecar": "sidecar"
+      "../sidecar": "sidecar",
+      "../gateway-bundle": "gateway-bundle"
     },
     "icon": [
       "icons/32x32.png",

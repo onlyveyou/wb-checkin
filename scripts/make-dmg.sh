@@ -39,4 +39,20 @@ mkdir -p "$BUNDLE/dmg"
 rm -f "$OUT"
 /usr/bin/hdiutil create -volname "WB-Checkin" -srcfolder "$STAGE" -ov -format UDZO "$OUT" >/dev/null
 
+# 每次打包只留新包：本地产物目录和交付目录里的旧 dmg / dmg.zip 一律清掉。
+# 放在成功之后做，打包失败时旧包还在，不会把能用的包先删了。
+find "$BUNDLE/dmg" -maxdepth 1 -type f \
+  \( -name 'WB-Checkin_*.dmg' -o -name 'WB-Checkin_*.dmg.zip' \) \
+  ! -name "$(basename "$OUT")" -exec /bin/rm -f {} +
+
+DELIVER_DIR="${WB_CHECKIN_DMG_DIR:-/Volumes/Apreslavie/wb-checkin}"
+if [ -d "$DELIVER_DIR" ]; then
+  NEW_NAME="WB-Checkin-${VERSION}-arm64.dmg"
+  find "$DELIVER_DIR" -maxdepth 1 -type f \
+    \( -name 'WB-Checkin-*.dmg' -o -name 'WB-Checkin-*.dmg.zip' \) \
+    ! -name "$NEW_NAME" -exec /bin/rm -f {} +
+  /bin/cp -f "$OUT" "$DELIVER_DIR/$NEW_NAME"
+  echo "已交付：${DELIVER_DIR}/${NEW_NAME}（旧包已清理）"
+fi
+
 echo "$OUT"

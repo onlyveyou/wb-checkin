@@ -4184,7 +4184,7 @@ dependencies = [
 
 [[package]]
 name = "wb-checkin"
-version = "0.10.9"
+version = "0.14.4"
 dependencies = [
  "base64 0.22.1",
  "bytes",
