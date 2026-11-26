@@ -7,6 +7,20 @@
 
 ## [未发布]
 
+## [0.14.6] - 2026-11-26
+
+### 新增
+
+### 变更
+
+### 修复
+
+- **桌面上弹出一块 Chrome 窗口，顶部还挂着「您使用的是不受支持的命令行标记」**：
+  聊天浏览器是 `--disable-blink-features=AutomationControlled` 启动的 —— 这个标记本来是给
+  playwright/puppeteer 用的（它们会同时带 `--enable-automation`，把 `navigator.webdriver` 变成 true），
+  而我们是直接 spawn 浏览器的，本来就 `webdriver=false`，标记纯属多余；Chrome 会因此顶一条警告条，
+  顺带把最小化的窗口重新顶出来。现在去掉该标记，并在每次调用前检查窗口状态，不是最小化就再最小化。
+
 ## [0.14.5] - 2026-11-26
 
 ### 新增

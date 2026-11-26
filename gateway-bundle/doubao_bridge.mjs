@@ -541,7 +541,10 @@ async function ensureBrowser() {
     // 不能加 --headless：豆包 shark 风控按浏览器特征判定，headless 一律回 710022004
     // （decision type=verify, verify_scene=doubao_message_web），跟账号、额度、cookie 都无关。
     '--no-first-run', '--no-default-browser-check',
-    '--disable-blink-features=AutomationControlled',
+    // 不要加 --disable-blink-features=AutomationControlled：Chrome 会因此顶一条
+    // 「您使用的是不受支持的命令行标记」提示条，还会把最小化的窗口重新顶出来。
+    // 那个标记本来是给 playwright/puppeteer 用的（它们会带 --enable-automation 把
+    // navigator.webdriver 变成 true）；我们直接 spawn 浏览器的，webdriver 本来就是 false。
     '--disable-features=TranslateUI',
     '--window-size=520,360', '--window-position=60,60',
     '--disable-background-timer-throttling',
@@ -567,6 +570,28 @@ async function ensureBrowser() {
       if (r.result?.value?.url?.includes('doubao.com') && r.result.value.hooked) return;
     } catch {}
     await sleep(1000);
+  }
+}
+
+/** 窗口有没有被顶出来（Chrome 偶发会在页面跳转/提示条后自己 restore）。 */
+async function windowState(port) {
+  try {
+    const version = await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json());
+    const ws = new WebSocket(version.webSocketDebuggerUrl);
+    const cdp = new CDP(ws);
+    await new Promise((res, rej) => {
+      ws.addEventListener('open', res, { once: true });
+      ws.addEventListener('error', rej, { once: true });
+    });
+    const { targetInfos } = await cdp.send('Target.getTargets');
+    const page = targetInfos.find((t) => t.type === 'page');
+    if (!page) return '';
+    const { windowId } = await cdp.send('Browser.getWindowForTarget', { targetId: page.targetId });
+    const { bounds } = await cdp.send('Browser.getWindowBounds', { windowId });
+    cdp.close();
+    return bounds?.windowState || '';
+  } catch {
+    return '';
   }
 }
 
@@ -764,6 +789,8 @@ const EVAL_CHAT = `async ([payloadJson, model]) => {
 export async function doubaoChat(text, model = 'doubao', ctx = {}) {
   if (!loggedIn()) throw new Error('豆包未登录：请在「豆包」标签里先登录，或点「重新登录」');
   await ensureBrowser();
+  // 这个窗口只是后台跑的「页面上下文」，不该出现在桌面上；Chrome 偶尔会自己 restore。
+  if ((await windowState(CHAT_PORT)) !== 'minimized') await minimizeWindow(CHAT_PORT);
   // 先挂拦截：页面在我们这条请求跑完后会自己补一条 recovery，不挡住就是双倍扣额度
   await ensureGuard().catch(() => {});
   const key = String(ctx?.key || '');
