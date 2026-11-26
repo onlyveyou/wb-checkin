@@ -338,7 +338,7 @@ WorkBuddy → 127.0.0.1:41980 → 隔离的 opencode serve → OpenCode Zen 免�
 
 ## 网页额度渠道（可选）
 
-把三个平台的**网页版免费额度**接进 WorkBuddy 的模型选择器。入口是「自定义模型 / OrcaTerm / 豆包 / Antigravity」四个标签页，**全部默认关闭**。
+把三个平台的**网页版免费额度**接进 WorkBuddy 的模型选择器。入口是「OrcaTerm / 豆包 / Antigravity」三个标签页，**全部默认关闭**。它们和「自定义模型」共用同一个内置网关 —— 后者是另外 15 家自己填 key 的上游。
 
 ```
 WorkBuddy ──127.0.0.1:8901/v1──▶ 内置网关 ──┬─ OrcaTerm（cookie 反代）
