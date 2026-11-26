@@ -248,6 +248,45 @@ function loggedIn() {
   try { return Boolean(cookieValue(readCfg().providers?.doubao?.cookie, 'sessionid')); } catch { return false; }
 }
 
+/**
+ * 会话映射：WorkBuddy 的「一个会话」对应豆包的一个会话。
+ *
+ * 以前是全局复用同一个 conversation_id（config.doubao.conversation），结果是所有
+ * WorkBuddy 会话都灌进同一条豆包对话里 —— 新建会话问一句「今天的财政动态」，
+ * 豆包看到历史里已经问过，就回一句「用户重复查询，此前已完成答复。」，
+ * 而且上下文互相污染。现在按客户端会话指纹分开存，指纹由网关算好传进来。
+ *
+ * 同一会话继续追问时消息数只增不减（客户端每次都发全量历史），新会话则从很小开始，
+ * 所以「消息数比上次少」就等于「这是新会话，我要另开一条豆包对话」。
+ */
+const SESSION_TTL = 12 * 3600 * 1000;
+const SESSION_MAX = 24;
+
+function pickConversation(key, count) {
+  if (!key) return '';
+  let rec;
+  try { rec = (readCfg().doubao?.sessions || {})[key]; } catch { return ''; }
+  if (!rec || !rec.id) return '';
+  if (Date.now() - (rec.at || 0) > SESSION_TTL) return '';
+  if (Number.isFinite(count) && Number.isFinite(rec.count) && count + 1 < rec.count) return '';
+  return rec.id;
+}
+
+function saveConversation(key, id, count) {
+  if (!key || !id) return;
+  try {
+    const cfg = readCfg();
+    cfg.doubao = cfg.doubao || {};
+    const map = cfg.doubao.sessions || {};
+    map[key] = { id, at: Date.now(), count: Number.isFinite(count) ? count : 0 };
+    const keep = Object.keys(map).sort((a, b) => (map[b].at || 0) - (map[a].at || 0)).slice(0, SESSION_MAX);
+    cfg.doubao.sessions = Object.fromEntries(keep.map((k) => [k, map[k]]));
+    // 旧的全局会话键已废弃，留着会被误认为「还有一条共用的对话」
+    delete cfg.doubao.conversation;
+    writeCfgSafe(cfg);
+  } catch {}
+}
+
 /** 极简 CDP over WebSocket（Node 22 全局 WebSocket，无第三方依赖） */
 class CDP {
   constructor(ws) {
@@ -648,7 +687,9 @@ const EVAL_CHAT = `async ([payloadJson, model]) => {
     if (!res.ok) return JSON.stringify({ error: 'HTTP ' + res.status, body: (await res.text()).slice(0, 500) });
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = '', answer = '', thinking = '', marks = 0, conv = '';
+    let buffer = '', answer = '', thinking = '', conv = '';
+    let thinkId = '', curIsThinking = false;
+    const types = new Set();
     const take = (obj) => {
       if (!obj || typeof obj !== 'object') return;
       if (obj.code && obj.code !== 0) { answer = ''; throw new Error('code=' + obj.code + ' ' + (obj.msg || obj.message || '')); }
@@ -661,8 +702,12 @@ const EVAL_CHAT = `async ([payloadJson, model]) => {
           : obj.error_msg || '';
         throw new Error('code=' + obj.error_code + ' ' + friendly);
       }
+      // 顶层 {"text": "..."} 是「当前正在写的那个文本块」的增量，归属要跟着块走：
+      // 思考区的子块（parent_id = 10040 容器的 block_id）算思考，正文块算回答。
+      // 以前靠 10040 出现次数的奇偶去猜，但 start/update/finish 会来好几次，奇偶必然错位，
+      // 结果推理和正文互相串门 —— 客户端看到的就是截断或自说自话。
       if (typeof obj.text === 'string' && obj.text && !obj.error_code) {
-        if (marks % 2 === 1) thinking += obj.text; else answer += obj.text;
+        if (curIsThinking) thinking += obj.text; else answer += obj.text;
         return;
       }
       const blocks = [];
@@ -674,10 +719,21 @@ const EVAL_CHAT = `async ([payloadJson, model]) => {
       if (dc && Array.isArray(dc.content_block)) blocks.push(...dc.content_block);
       for (const cb of blocks) {
         const bt = cb.block_type || 0;
+        types.add(bt);
         const c = cb.content || {};
-        if (bt === 10040) { marks += 1; continue; }
-        if (bt === 10000 && c.text_block && c.text_block.text) {
-          if (marks % 2 === 1) thinking += c.text_block.text; else answer += c.text_block.text;
+        if (bt === 10040) {
+          // 思考区容器（只带标题/状态，正文在它的子块里）
+          if (cb.block_id) thinkId = cb.block_id;
+          curIsThinking = true;
+          continue;
+        }
+        if (bt === 10000) {
+          const pid = cb.parent_id || '';
+          curIsThinking = Boolean(pid) && (!thinkId || pid === thinkId);
+          const text = c.text_block && c.text_block.text;
+          if (text) {
+            if (curIsThinking) thinking += text; else answer += text;
+          }
         }
       }
       const cid = obj.conversation_id || (obj.message && obj.message.conversation_id);
@@ -699,23 +755,38 @@ const EVAL_CHAT = `async ([payloadJson, model]) => {
         try { take(JSON.parse(s)); } catch (e) { if (String(e.message).startsWith('code=')) throw new Error(e.message); }
       }
     }
-    return JSON.stringify({ answer: answer || (thinking ? thinking : ''), thinking, conversation_id: conv, model, raw: raw.slice(-2000) });
+    return JSON.stringify({ answer: answer || (thinking ? thinking : ''), thinking, conversation_id: conv, model, types: [...types], raw: raw.slice(-2000) });
   } catch (e) {
     return JSON.stringify({ error: e.message });
   }
 }`;
 
-export async function doubaoChat(text, model = 'doubao') {
+export async function doubaoChat(text, model = 'doubao', ctx = {}) {
   if (!loggedIn()) throw new Error('豆包未登录：请在「豆包」标签里先登录，或点「重新登录」');
   await ensureBrowser();
   // 先挂拦截：页面在我们这条请求跑完后会自己补一条 recovery，不挡住就是双倍扣额度
   await ensureGuard().catch(() => {});
-  // 复用上一条会话：客户端本身就在同一会话里连续提问，每次新建会话更容易被限流
-  let convId = '';
-  try {
-    const c = readCfg().doubao?.conversation;
-    if (c?.id && Date.now() - (c.at || 0) < 6 * 3600 * 1000) convId = c.id;
-  } catch {}
+  const key = String(ctx?.key || '');
+  const count = Number(ctx?.count);
+  let convId = pickConversation(key, count);
+  let out = await runOnce(text, model, convId);
+  // 复用的对话里回空：豆包对「已经问过的内容」会只回状态帧、不吐正文。
+  // 换一条新对话再问一次，比把空串当成正常回答回给客户端要好。
+  if (!out.answer && !out.thinking && convId) {
+    console.error('[doubao] 复用会话空回答，改用新会话重试');
+    out = await runOnce(text, model, '');
+    convId = '';
+  }
+  recordUsage(model, out);
+  if (!out.answer && !out.thinking) {
+    console.error('[doubao] 空回答：块类型=' + JSON.stringify(out.types || []) + ' raw=' + String(out.raw || '').slice(-400));
+  }
+  if (out.conversation_id) saveConversation(key, out.conversation_id, count);
+  return out;
+}
+
+/** 跑一次上游调用（= 某条豆包对话里的一问）。 */
+async function runOnce(text, model, convId) {
   const cdp = await CDP.attach(`http://127.0.0.1:${CHAT_PORT}`);
   try {
     await cdp.send('Network.enable').catch(() => {});
@@ -735,16 +806,6 @@ export async function doubaoChat(text, model = 'doubao') {
     }
     const out = JSON.parse(r.result?.value || '{"error":"空响应"}');
     if (out.error) throw new Error(out.error + (out.body ? '：' + out.body : ''));
-    // 记一次消耗（额度差值留到面板刷新时算，这里只记调用与用量样本）
-    recordUsage(model, out);
-    if (out.conversation_id && out.conversation_id !== convId) {
-      try {
-        const cfg = readCfg();
-        cfg.doubao = cfg.doubao || {};
-        cfg.doubao.conversation = { id: out.conversation_id, at: Date.now() };
-        writeCfgSafe(cfg);
-      } catch {}
-    }
     return out;
   } finally {
     cdp.close();

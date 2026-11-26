@@ -783,6 +783,30 @@ function wantsAntigravity(payload, requested) {
   if (Array.isArray(payload.models) && payload.models.some(hit)) return true;
   return TIER === 'antigravity';
 }
+/**
+ * 豆包会话指纹：同一个 WorkBuddy 会话 → 同一条豆包对话。
+ *
+ * 取第一条用户消息做指纹（同一会话内恒定、跨会话基本不同），再带上消息总数，
+ * 让桥接能靠「消息数变少了」识别出「同一个开头但其实是新会话」。
+ * 不能再用全局一个 conversation_id —— 那会把所有会话灌进同一条豆包对话，
+ * 豆包看到历史里问过就回「用户重复查询，此前已完成答复。」。
+ */
+function doubaoSessionCtx(payload) {
+  const msgs = Array.isArray(payload.messages) ? payload.messages : [];
+  let first = '';
+  for (const m of msgs) {
+    if (m?.role !== 'user') continue;
+    let t = m.content;
+    if (Array.isArray(t)) t = t.map((p) => (typeof p === 'string' ? p : p?.text || '')).filter(Boolean).join('\n');
+    t = String(t ?? '').trim();
+    if (t) { first = t; break; }
+  }
+  let h = 2166136261;
+  const s = first.slice(0, 2000);
+  for (let i = 0; i < s.length; i += 1) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return { key: first ? (h >>> 0).toString(16) : '', count: msgs.length };
+}
+
 function lastUserText(payload) {
   const msgs = Array.isArray(payload.messages) ? payload.messages : [];
   for (let i = msgs.length - 1; i >= 0; i -= 1) {
@@ -893,7 +917,7 @@ async function handleCompletions(req, res, rawBody) {
       if (isDoubao || isAg) {
         const t0 = Date.now();
         try {
-          const d = isAg ? await antigravityChat(payload, entry.model) : await doubaoChat(lastUserText(payload), entry.model);
+          const d = isAg ? await antigravityChat(payload, entry.model) : await doubaoChat(lastUserText(payload), entry.model, doubaoSessionCtx(payload));
           r = {
             code: 200,
             body: JSON.stringify({
